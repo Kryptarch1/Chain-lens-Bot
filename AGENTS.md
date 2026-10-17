@@ -58,7 +58,6 @@ owner-only functions and says "ask for dd sim to confirm".
 | Deep check (stateful sell tests: delayed honeypot, sell caps, funds taken) — ONLY when asked | `dd check <chain> <token> --deep` or `dd sell <chain> <token>` |
 | What does this ONE function really do (read the code) | `dd code <chain> <address> <function>` (name, signature or selector; `--from 0x..` `--args a,b` to choose caller/args; works on proxies and hooks) |
 | Where did a wallet's money come from | `dd trace <chain> <wallet>` |
-| Find a project on X / who's talking about it / new accounts around it | `dd x find <name> [context…] [--days 90] [--max 50]` (e.g. `dd x find chimera ink`): likely project accounts, most-tagged accounts, RECENTLY CREATED accounts, links shared, top posts. Read-only, ~$0.25 per search (posts $0.005, accounts $0.01), cached 6 h. Keyword ACCOUNT search is not allowed with an app token, so accounts are found through posts. |
 | Anything else (old toolkit) | `dd <chain> token|audit|cast|rpc|fork|wallet` |
 
 `dd check` covers: functions (bytecode → names → risky/unknown), who can call each privileged function
