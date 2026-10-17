@@ -1,0 +1,209 @@
+[
+ {
+  "name": "ARCADE",
+  "chain": "sonic",
+  "token": "0xeEb785CD554B773582A21a673546b0889c9A3b01",
+  "expect": "NOT SAFE",
+  "must_contain": [
+   "testSystemUpdate",
+   "SUPPLY RAISED AFTER LAUNCH"
+  ],
+  "why": "disguised owner-only mint on a 'renounced' token; dev already minted 100B; LP NFT burned (decoy safety)"
+ },
+ {
+  "name": "COOK",
+  "chain": "avax",
+  "token": "0x4B69373d292F934C55C1e8823676D95dAE7a0E12",
+  "expect": "NOT SAFE",
+  "must_contain": [
+   "LP PULLED"
+  ],
+  "why": "liquidity held by dev-owned EdomaeLpManager, then removed (tx 0x9304c8e3\u2026)"
+ },
+ {
+  "name": "ONDEX",
+  "chain": "eth",
+  "token": "0xd1840ca019d18217cf23bc489bb21e8873499cad",
+  "expect_lp": "LOCKED",
+  "must_contain": [
+   "LiquidityLocker",
+   "no removal function found"
+  ],
+  "why": "launchpad clone; all liquidity in verified LiquidityLocker with no remove function"
+ },
+ {
+  "name": "PULP",
+  "chain": "rh",
+  "token": "0xBc2283d12B1f2f46c1613AE672E95C55b69Ca414",
+  "expect": "NOT SAFE",
+  "must_contain": [],
+  "why": "clean ERC-20 but 99% of main-pool LP (NFT #3668117) in a plain wallet \u2014 regression: pool start-block estimate overshot on rh and missed the add \u2192 false 'PULLED' (fixed 2026-10-17)",
+  "drift": [
+   "0x04954601f26af8e68fa4ad0adb56bddff00649fa",
+   "can remove any time"
+  ]
+ },
+ {
+  "name": "MILL",
+  "chain": "hyper",
+  "token": "0x0e0d6075679657cc0b08679f582f6615343c85bd",
+  "expect": "NOT SAFE",
+  "must_contain": [
+   "setController",
+   "setOracle",
+   "mint(address,uint256)"
+  ],
+  "why": "owner can swap oracle (block sells) and controller (mint); controller mints"
+ },
+ {
+  "name": "PAD",
+  "chain": "eth",
+  "token": "0xb729f3f9b60e41134c6e64be71753f81842f6061",
+  "expect": "NOT SAFE",
+  "must_contain": [
+   "LP PULLED",
+   "0x9184a1465a19713ba8d02e310088e39ae2e711f6b8c6e194285e32429482bd86"
+  ],
+  "why": "dev pulled the v4 LP (NFT #467523) on 2026-10-16 16:44 UTC, tx 0x9184a146\u2026"
+ },
+ {
+  "name": "SIM-PAD",
+  "cmd": "sim",
+  "chain": "eth",
+  "token": "0xb729f3f9b60e41134c6e64be71753f81842f6061",
+  "must_contain": [
+   "liquidity already removed"
+  ],
+  "why": "LP already pulled on 2026-10-16 \u2014 rug sim must report it, not try to pull again"
+ },
+ {
+  "name": "SIM-MILL",
+  "cmd": "sim",
+  "chain": "hyper",
+  "token": "0x0e0d6075679657cc0b08679f582f6615343c85bd",
+  "must_contain": [
+   "burn()",
+   "holders can't sell"
+  ],
+  "why": "v2 LP burn by dev; setOracle blocks sells",
+  "drift": [
+   "CAN PULL"
+  ]
+ },
+ {
+  "name": "SIM-ONDEX",
+  "cmd": "sim",
+  "chain": "eth",
+  "token": "0xd1840ca019d18217cf23bc489bb21e8873499cad",
+  "must_contain": [
+   "can't be pulled"
+  ],
+  "why": "locker with no removal function"
+ },
+ {
+  "name": "SIM-PULP",
+  "cmd": "sim",
+  "chain": "rh",
+  "token": "0xBc2283d12B1f2f46c1613AE672E95C55b69Ca414",
+  "must_contain": [],
+  "why": "v4 NFT in plain wallet",
+  "drift": [
+   "CAN PULL",
+   "NFT #3668117"
+  ]
+ },
+ {
+  "name": "WHEEL",
+  "chain": "rh",
+  "token": "0xeb579e280648b6f48a840086a9e6631500a20684",
+  "expect_lp": "LOCKED",
+  "must_contain": [
+   "no removal path",
+   "collect(address)"
+  ],
+  "why": "StandardLaunchHook holds 100% of the liquidity; its only removal-like fn collect(token) takes fees, not liquidity (traced). Was a false 'LP UNCLEAR'."
+ },
+ {
+  "name": "DEEP-WHEEL",
+  "chain": "rh",
+  "token": "0xeb579e280648b6f48a840086a9e6631500a20684",
+  "args": [
+   "--deep"
+  ],
+  "must_contain": [
+   "hook takes 4.00%",
+   "real v4 swaps through the PoolManager",
+   "afterSwap \u2192 PoolManager.mint"
+  ],
+  "why": "4% fee hook (afterSwapReturnDelta) \u2014 fee must be MEASURED from real v4 swaps (was missed once)"
+ },
+ {
+  "name": "DEEP-IMDO",
+  "chain": "eth",
+  "token": "0x87b525bc5ff6d7211f16291219c363e082ed4e9f",
+  "args": [
+   "--deep"
+  ],
+  "must_contain": [
+   "0xaa90\u2026c3f7 (native)",
+   "lowerFee(uint16)"
+  ],
+  "why": "UNVERIFIED fee hook: 1.5% to treasury 0xaa90\u2026c3f7 in ETH; lowerFee owned by Safe 2-of-3 \u2014 measured without source",
+  "drift": [
+   "hook takes 1.50%"
+  ]
+ },
+ {
+  "name": "SIM-WHEEL",
+  "cmd": "sim",
+  "chain": "rh",
+  "token": "0xeb579e280648b6f48a840086a9e6631500a20684",
+  "must_contain": [
+   "== HOOK SIM",
+   "hook takes 4.00%"
+  ],
+  "why": "dd sim shows the hook sim for v4 hook pools"
+ },
+ {
+  "name": "DEEP-MILL",
+  "chain": "hyper",
+  "token": "0x0e0d6075679657cc0b08679f582f6615343c85bd",
+  "args": [
+   "--deep"
+  ],
+  "must_contain": [
+   "== CODE (decompiled",
+   "mint(address,uint256) (only controller) changes totalSupply",
+   "setOracle(address) [only owner]"
+  ],
+  "why": "unverified token: decompiled code must show the controller mint power and owner setters"
+ },
+ {
+  "name": "DEEP-ARCADE",
+  "chain": "sonic",
+  "token": "0xeEb785CD554B773582A21a673546b0889c9A3b01",
+  "args": [
+   "--deep"
+  ],
+  "expect": "NOT SAFE",
+  "must_contain": [
+   "Slither on verified source LaunchToken",
+   "testSystemUpdate(uint256) (owner-only) changes totalSupply"
+  ],
+  "why": "verified token with a disguised mint: Slither must read it from source"
+ },
+ {
+  "name": "DEEP-DANOM",
+  "chain": "monad",
+  "token": "0x1350c570d7ee2b290aadf8c2263fafa275477dfe",
+  "args": [
+   "--deep"
+  ],
+  "expect": "NOT SAFE",
+  "must_contain": [
+   "owner switches every transfer reads: maxBuy",
+   "LP PULLED"
+  ],
+  "why": "rugged ~7 min after launch; code shows owner-set maxBuy/pair that transfers read"
+ }
+]

@@ -1,0 +1,304 @@
+{
+ "_doc": "Per-chain config. rpc = ordered list (first = primary, rest = fallbacks). logs_rpc = endpoints used only for eth_getLogs (some free RPCs refuse old logs but serve state fine). logs_range = max blocks per getLogs. logs_recent_only = free endpoints can't search old blocks (needs paid RPC). explorer = etherscan-v2 chain id / blockscout / routescan. v4 = Uniswap v4 core addresses. wnative = wrapped native token.",
+ "eth": {
+  "id": 1,
+  "symbol": "ETH",
+  "rpc": [
+   "https://ethereum-rpc.publicnode.com",
+   "https://eth.drpc.org",
+   "https://rpc.flashbots.net"
+  ],
+  "logs_range": 50000,
+  "explorer": {
+   "etherscan": 1,
+   "blockscout": "https://eth.blockscout.com",
+   "web": "https://etherscan.io"
+  },
+  "dexscreener": "ethereum",
+  "v4": {
+   "pool_manager": "0x000000000004444c5dc75cb358380d2e3de08a90",
+   "posm": "0xbd216513d74c8cf14cf4747e6aaa6420ff64ee9e",
+   "state_view": "0x7ffe42c4a5deea5b0fec41c94c136cf115597227"
+  },
+  "v3_factories": [
+   "0x1f98431c8ad98523631ae4a59f267346ea31f984"
+  ],
+  "v2_factories": [
+   "0x5c69bee701ef814a2b6a3edd4b1652cb9cc5aa6f"
+  ],
+  "logs_rpc": [
+   "https://rpc.flashbots.net",
+   "https://eth.drpc.org"
+  ],
+  "wnative": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+  "logs_unreliable": true
+ },
+ "base": {
+  "id": 8453,
+  "symbol": "ETH",
+  "rpc": [
+   "https://mainnet.base.org",
+   "https://base-rpc.publicnode.com",
+   "https://base.llamarpc.com"
+  ],
+  "logs_range": 2000,
+  "explorer": {
+   "etherscan": 8453,
+   "blockscout": "https://base.blockscout.com",
+   "web": "https://basescan.org"
+  },
+  "dexscreener": "base",
+  "v4": {
+   "pool_manager": "0x498581ff718922c3f8e6a244956af099b2652b2b",
+   "posm": "0x7c5f5a4bbd8fd63184577525326123b519429bdc",
+   "state_view": "0xa3c0c9b65bad0b08107aa264b0f3db444b867a71"
+  },
+  "v3_factories": [
+   "0x33128a8fc17869897dce68ed026d694621f6fdfd"
+  ],
+  "v2_factories": [
+   "0x8909dc15e40173ff4699343b6eb8132c65e18ec6"
+  ],
+  "logs_rpc": [
+   "https://base-rpc.publicnode.com",
+   "https://mainnet.base.org"
+  ],
+  "logs_recent_only": true,
+  "wnative": "0x4200000000000000000000000000000000000006"
+ },
+ "bsc": {
+  "id": 56,
+  "symbol": "BNB",
+  "rpc": [
+   "https://bsc-dataseed.binance.org",
+   "https://bsc-rpc.publicnode.com",
+   "https://bsc-dataseed1.defibit.io"
+  ],
+  "logs_range": 2000,
+  "explorer": {
+   "etherscan": 56,
+   "web": "https://bscscan.com"
+  },
+  "dexscreener": "bsc",
+  "v4": {
+   "pool_manager": "0x28e2ea090877bf75740558f6bfb36a5ffee9e9df",
+   "posm": "0x7a4a5c919ae2541aed11041a1aeee68f1287f95b",
+   "state_view": "0xd13dd3d6e93f276fafc9db9e6bb47c1180aee0c4"
+  },
+  "v3_factories": [
+   "0x0bfbcf9fa4f9c56b0f40a671ad40e0805a091865"
+  ],
+  "v2_factories": [
+   "0xca143ce32fe78f1f7019d7d551a6402fc5350c73"
+  ],
+  "logs_rpc": [
+   "https://bsc-rpc.publicnode.com"
+  ],
+  "logs_recent_only": true,
+  "wnative": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"
+ },
+ "arb": {
+  "id": 42161,
+  "symbol": "ETH",
+  "rpc": [
+   "https://arb1.arbitrum.io/rpc",
+   "https://arbitrum-one-rpc.publicnode.com"
+  ],
+  "logs_range": 5000,
+  "explorer": {
+   "etherscan": 42161,
+   "blockscout": "https://arbitrum.blockscout.com",
+   "web": "https://arbiscan.io"
+  },
+  "dexscreener": "arbitrum",
+  "v4": {
+   "pool_manager": "0x360e68faccca8ca495c1b759fd9eee466db9fb32",
+   "posm": "0xd88f38f930b7952f2db2432cb002e7abbf3dd869",
+   "state_view": "0x76fd297e2d437cd7f76d50f01afe6160f86e9990"
+  },
+  "wnative": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+ },
+ "op": {
+  "id": 10,
+  "symbol": "ETH",
+  "rpc": [
+   "https://mainnet.optimism.io",
+   "https://optimism-rpc.publicnode.com"
+  ],
+  "logs_range": 5000,
+  "explorer": {
+   "etherscan": 10,
+   "blockscout": "https://optimism.blockscout.com",
+   "web": "https://optimistic.etherscan.io"
+  },
+  "dexscreener": "optimism",
+  "v4": {
+   "pool_manager": "0x9a13f98cb987694c9f086b1f5eb990eea8264ec3",
+   "posm": "0x3c3ea4b57a46241e54610e5f022e5c45859a1017"
+  },
+  "wnative": "0x4200000000000000000000000000000000000006"
+ },
+ "avax": {
+  "id": 43114,
+  "symbol": "AVAX",
+  "rpc": [
+   "https://api.avax.network/ext/bc/C/rpc",
+   "https://avalanche-c-chain-rpc.publicnode.com"
+  ],
+  "logs_range": 50000,
+  "explorer": {
+   "etherscan": 43114,
+   "routescan": "https://api.routescan.io/v2/network/mainnet/evm/43114/etherscan/api",
+   "web": "https://snowscan.xyz"
+  },
+  "dexscreener": "avalanche",
+  "v4": {
+   "pool_manager": "0x06380c0e0912312b5150364b9dc4542ba0dbbc85",
+   "posm": "0xb74b1f14d2754acfcbbe1a221023a5cf50ab8acd"
+  },
+  "logs_rpc": [
+   "https://avalanche-c-chain-rpc.publicnode.com"
+  ],
+  "wnative": "0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7"
+ },
+ "sonic": {
+  "id": 146,
+  "symbol": "S",
+  "rpc": [
+   "https://rpc.soniclabs.com",
+   "https://sonic-rpc.publicnode.com"
+  ],
+  "logs_range": 50000,
+  "explorer": {
+   "etherscan": 146,
+   "web": "https://sonicscan.org"
+  },
+  "dexscreener": "sonic",
+  "wnative": "0x039e2fb66102314ce7b64ce5ce3e5183bc94ad38"
+ },
+ "hyper": {
+  "id": 999,
+  "symbol": "HYPE",
+  "rpc": [
+   "https://rpc.hyperliquid.xyz/evm",
+   "https://hyperliquid.drpc.org"
+  ],
+  "logs_range": 1000,
+  "rps": 3,
+  "explorer": {
+   "etherscan": 999,
+   "web": "https://hyperevmscan.io"
+  },
+  "dexscreener": "hyperevm",
+  "wnative": "0x5555555555555555555555555555555555555555"
+ },
+ "ink": {
+  "id": 57073,
+  "symbol": "ETH",
+  "rpc": [
+   "https://rpc-gel.inkonchain.com",
+   "https://rpc-qnd.inkonchain.com"
+  ],
+  "logs_range": 5000,
+  "explorer": {
+   "blockscout": "https://explorer.inkonchain.com",
+   "web": "https://explorer.inkonchain.com"
+  },
+  "dexscreener": "ink",
+  "v4": {
+   "pool_manager": "0x360e68faccca8ca495c1b759fd9eee466db9fb32"
+  },
+  "wnative": "0x4200000000000000000000000000000000000006",
+  "private_logs_range": 5000
+ },
+ "rh": {
+  "id": 4663,
+  "symbol": "ETH",
+  "rpc": [
+   "https://rpc.mainnet.chain.robinhood.com"
+  ],
+  "headers": {
+   "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36"
+  },
+  "logs_range": 5000000,
+  "explorer": {
+   "etherscan": 4663,
+   "blockscout": "https://robinhoodchain.blockscout.com",
+   "web": "https://robin.etherscan.io",
+   "note": "blockscout is Cloudflare-blocked from this VPS"
+  },
+  "dexscreener": "robinhood",
+  "v4": {
+   "pool_manager": "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+   "posm": "0x58daec3116aae6d93017baaea7749052e8a04fa7"
+  },
+  "rps": 3
+ },
+ "xlayer": {
+  "id": 196,
+  "symbol": "OKB",
+  "rpc": [
+   "https://rpc.xlayer.tech",
+   "https://xlayerrpc.okx.com"
+  ],
+  "logs_range": 100,
+  "explorer": {
+   "web": "https://www.oklink.com/xlayer"
+  },
+  "dexscreener": "xlayer",
+  "v4": {
+   "pool_manager": "0x360e68faccca8ca495c1b759fd9eee466db9fb32"
+  }
+ },
+ "mega": {
+  "id": 4326,
+  "symbol": "ETH",
+  "rpc": [
+   "https://mainnet.megaeth.com/rpc"
+  ],
+  "logs_range": 1000,
+  "explorer": {
+   "web": "https://megaeth.blockscout.com",
+   "blockscout": "https://megaeth.blockscout.com",
+   "verify": true
+  },
+  "dexscreener": "megaeth"
+ },
+ "monad": {
+  "id": 143,
+  "symbol": "MON",
+  "rpc": [
+   "https://rpc.monad.xyz"
+  ],
+  "logs_range": 100,
+  "explorer": {
+   "web": "https://monadscan.com",
+   "etherscan": 143,
+   "verify": true
+  },
+  "dexscreener": "monad"
+ },
+ "arc": {
+  "id": 5042,
+  "symbol": "USDC",
+  "rpc": [
+   "https://5042.rpc.thirdweb.com",
+   "https://arcexplorer.org/rpc"
+  ],
+  "logs_rpc": [
+   "https://arcexplorer.org/rpc",
+   "https://5042.rpc.thirdweb.com"
+  ],
+  "logs_range": 1000,
+  "explorer": {
+   "etherscan": 5042,
+   "web": "https://arc.etherscan.io"
+  },
+  "dexscreener": "arc",
+  "v4": {
+   "pool_manager": "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+   "posm": "0x6049c9a0e26405c0985f9e3685c87d0ae917f82b"
+  },
+  "wnative": "0x3600000000000000000000000000000000000000"
+ }
+}

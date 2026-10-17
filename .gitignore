@@ -1,0 +1,17 @@
+# --- secrets: NEVER commit ---
+keys/
+*.key
+*.pem
+.env
+.env.*
+
+# --- rebuildable / large ---
+.venv/
+data/
+*.db
+*.db-journal
+tools/heimdall/heimdall
+fixtures/out/
+fixtures/cache/
+__pycache__/
+*.pyc

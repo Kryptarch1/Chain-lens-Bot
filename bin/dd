@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# dd <cmd> <chain> <target> [flags]
+# cmds: check | lp | dev | cluster | tx | sim | chains
+set -euo pipefail
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+PY="$ROOT/.venv/bin/python"
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+  check|lp|dev|cluster|tx|sim|trace|sell|code) exec "$PY" "$ROOT/cmds/$cmd.py" "$@" ;;
+  chains) "$PY" -c "import json;d=json.load(open('$ROOT/chains.json'));d.pop('_doc',None);[print(f'{k:7} id {v[\"id\"]:>6}  {v[\"rpc\"][0]}') for k,v in d.items()]" ;;
+  help|-h|--help) echo "usage: dd <check|sim|sell|trace|code|chains> <chain> <target> [function] [--fast] [--json]   (other cmds fall through to the old toolkit: token audit cast rpc fork wallet load-key wipe-key)"; exit 0 ;;
+  *) exec /root/dd-kit/dd "$cmd" "$@" ;;
+esac
