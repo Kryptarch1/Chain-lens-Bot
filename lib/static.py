@@ -9,7 +9,7 @@ Findings are READ FROM CODE (inferred); simulations prove behaviour.
 import asyncio, json, os, re, sys, tempfile, shutil
 from lib import cache
 
-VERSION = 6
+VERSION = 7
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = os.path.join(ROOT, ".venv", "bin", "python")
 SOLC_SELECT = os.path.join(ROOT, ".venv", "bin", "solc-select")
@@ -72,9 +72,14 @@ async def code(ex, addr, selector, timeout=90):
     if not solc:
         return {"error": f"no compiler for {sf.get('compiler')}"}
     settings = sf.get("settings") or {"optimizer": {"enabled": sf.get("optimizer"), "runs": sf.get("runs", 200)}}
-    out = await _work(sf["files"], settings, solc, sf.get("name"), timeout, {"mode": "code", "selector": selector})
-    if out.get("ok") and not out.get("error"):
-        cache.set(key, json.dumps(out))
+    allf = await _work(sf["files"], settings, solc, sf.get("name"), timeout, {"mode": "code_all"})
+    if not allf.get("ok"):
+        return allf
+    for sel, res in (allf.get("functions") or {}).items():  # one compile -> every function cached
+        if not res.get("error"):
+            res["ok"] = True
+            cache.set(f"code:v{VERSION}:{ex.chain}:{addr.lower()}:{sel}", json.dumps(res))
+    out = (allf.get("functions") or {}).get(selector.lower()) or {"error": f"no public function {selector}"}
     return out
 
 
@@ -143,6 +148,8 @@ def findings(s):
         return []
     out = []
     sup, bal = set(s.get("supply_vars") or []), set(s.get("balance_vars") or [])
+    if sup & bal:  # one storage struct holds supply AND balances (ERC-7201): any balance write looks like a supply change
+        sup, bal = set(), set()
     sw = switches(s)
     for f in s["fns"]:
         if _skip(f):

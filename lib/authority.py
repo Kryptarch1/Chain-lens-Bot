@@ -33,7 +33,7 @@ def role_name(r):
     return KNOWN_ROLES.get(r.lower(), r[:10] + "…")
 
 
-async def controller_kind(rpc, ex, a):
+async def controller_kind(rpc, ex, a, depth=0):
     """-> dict(kind, label, detail) for an address that holds power."""
     if not a or a.lower() == ZERO:
         return {"kind": "none", "label": "nobody"}
@@ -56,7 +56,15 @@ async def controller_kind(rpc, ex, a):
         out.update(kind="timelock", label=f"timelock, min delay {delay/3600:.1f}h for NEW operations (already-queued ones may be ready)", delay=delay)
         return out
     src = await ex.source(a)
-    out["label"] = f"contract {src.get('name') or '(unverified)'} — its own rules decide; not resolved"
+    name = src.get("name") or "(unverified)"
+    ok, o = await rpc.try_call(a, encode_call("owner()"))
+    if ok and o and len(o) >= 66 and depth < 2:  # e.g. ProxyAdmin: whoever owns it holds the power
+        own = "0x" + o[-40:]
+        sub = await controller_kind(rpc, ex, own, depth + 1)
+        signers = f" (signers: {', '.join(x[:6] + '…' + x[-4:] for x in sub.get('signers', [])[:3])})" if sub.get("signers") else ""
+        out.update(label=f"contract {name}, owned by {own[:6]}…{own[-4:]} = {sub['label']}{signers}", owner=own, owner_kind=sub)
+        return out
+    out["label"] = f"contract {name} — its own rules decide; not resolved"
     return out
 
 

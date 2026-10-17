@@ -362,7 +362,8 @@ def verdict(info, fns, probes, forkres, mints, lps):
             extra = f" ({fmt(mints['then'],dec,0)} at launch → {fmt(mints['now'],dec,0)} now)"
         bad.append(f"SUPPLY RAISED AFTER LAUNCH: +{fmt(mints['raised'],dec,0)} tokens{extra}")
     privileged = [p for p in probes if p.get("callers")]
-    risky = [f for f in fns if f["cls"] == "risky"]
+    open_to_all = {p["sel"] for p in probes if p.get("stranger")}  # any wallet can call it: not an owner power
+    risky = [f for f in fns if f["cls"] == "risky" and f["sel"] not in open_to_all]
     if risky:
         pr = [p["fn"] for p in privileged if any(p["sel"] == f["sel"] for f in risky)]
         callers = sorted(set(short(c) for p in privileged for c in p["callers"]))

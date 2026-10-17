@@ -16,6 +16,9 @@ from lib import quicksim
 
 BUYER = quicksim.BUYER
 REVERTER = "0x000000000000000000000000000000000000fE11"  # gets code 0xfe (INVALID) via override: every call to it reverts
+import re as _re
+# re-entry / in-progress guards: set and reset inside one call, so nobody can leave them switched on — not owner switches
+GUARD = _re.compile(r"(^_?(updating|entered|locked|lock|inswap|swapping|inclaim|bypass|status|reentr\w*|lifecycle\w*|processing|busy|mutex)$)", _re.I)
 TYPES_OK = ("bool", "address", "uint", "enum:", "mapping(address => bool)", "mapping(address => uint")
 
 
@@ -77,8 +80,10 @@ async def run(rpc, token, pool, hp, static_res, probes=(), limit=10):
             callers.setdefault(nm, p["callers"][0])
     jobs, skipped = [], []
     for var, setters in list(sw.items())[:limit]:
+        if GUARD.match(var):
+            continue
         e = lay.get(var)
-        if not e or not e["type"].startswith(TYPES_OK):
+        if not e or not e["type"].startswith(TYPES_OK) or "[" in e["type"]:
             skipped.append({"var": var, "skipped": "slot unknown (name used twice / packed struct)" if not e else f"type {e['type']} not testable", "setters": setters})
             continue
         for label, slot, off, size, val in candidates(var, e):

@@ -6,6 +6,7 @@ import json, sys
 import re
 SENDER = r"(?:msg\.sender|_msgSender\(\))"
 EQ = re.compile(rf"{SENDER}\s*[!=]=|[!=]=\s*{SENDER}")
+EQ_ONLY = re.compile(rf"{SENDER}\s*==|==\s*{SENDER}")
 ROLE = re.compile(rf"(?:hasRole|_checkRole|isAuthorized|isAdmin|isOperator)\([^)]*{SENDER}|_checkRole\(|_checkOwner\(\)")
 ALLOW = re.compile(rf"(?:require\(|if\s*\(\s*!?)\s*!?\w+\[{SENDER}\]\s*[),]")
 
@@ -19,7 +20,10 @@ def access_gate(f):
         e = str(n.expression or "")
         if not e:
             continue
-        if EQ.search(e):
+        # require(msg.sender != X) only excludes X (anyone else may call); require(msg.sender == X) and
+        # if (msg.sender != X) revert(...) are real gates
+        is_require = "require(" in e or "assert(" in e
+        if (is_require and EQ_ONLY.search(e)) or (not is_require and EQ.search(e)):
             return "caller == fixed/stored address"
         if ROLE.search(e):
             return "role check"
@@ -106,6 +110,12 @@ def main(inp, outp):
 
     if j.get("mode") == "code":  # one function's exact source + everything it reaches
         json.dump(code_of(c, j["selector"]), open(outp, "w"))
+        return
+    if j.get("mode") == "code_all":  # every public function at once: one compile serves all later `dd code` calls
+        from eth_utils import keccak
+        sels = sorted({"0x" + keccak(text=f.solidity_signature)[:4].hex() for f in c.functions
+                       if f.visibility in ("public", "external") and not f.is_constructor})
+        json.dump({"functions": {sel: code_of(c, sel) for sel in sels}}, open(outp, "w"))
         return
     supply_vars, balance_vars = vars_read("totalSupply()"), vars_read("balanceOf(address)")
     fns = []
