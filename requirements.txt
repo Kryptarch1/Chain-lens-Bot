@@ -1,0 +1,8 @@
+aiohttp==3.14.5
+crytic-compile==0.4.2
+eth-hash==0.8.0
+eth-utils==6.0.0
+eth_abi==6.0.0
+pycryptodome==3.24.1
+slither-analyzer==0.11.6
+solc-select==1.2.0

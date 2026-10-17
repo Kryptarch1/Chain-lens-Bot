@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# dd — chain-agnostic due-diligence helper.  Usage: dd <chain> <cmd> [args]
+# chains: eth | base | rh (Robinhood) | sol        (or any EVM: pass an RPC URL as <chain>)
+# cmds:
+#   token <addr>       one-shot token/contract snapshot (authorities, proxy, owner, GoPlus, DEX pairs)
+#   audit <addr>       Serialized Audit verdict (needs key in $KIT/keys/serialized)
+#   cast <args...>     raw cast with the chain's RPC wired in (EVM only)
+#   rpc <method> [json-params]   raw JSON-RPC call
+#   fork [port]        anvil fork of the chain for zero-cost dry runs (EVM)
+#   wallet             show burner address + balance on this chain
+#   load-key / wipe-key   stdin -> RAM-only burner key (/dev/shm), or shred it
+KIT="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"   # this toolkit's folder
+set -euo pipefail
+export PATH=$HOME/.foundry/bin:$HOME/.local/share/solana/install/active_release/bin:$PATH
+UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36"
+KEYDIR=/dev/shm/dd-burner   # RAM only — never on disk
+
+chain=${1:?chain}; cmd=${2:?cmd}; shift 2
+case $chain in
+  eth)  RPC=${DD_RPC_ETH:-https://ethereum-rpc.publicnode.com}; CID=1;    DS=ethereum; EXP=https://etherscan.io ;;
+  base) RPC=${DD_RPC_BASE:-https://mainnet.base.org};           CID=8453; DS=base;     EXP=https://basescan.org ;;
+  rh)   RPC=${DD_RPC_RH:-https://rpc.mainnet.chain.robinhood.com}; CID=4663; DS=robinhood; EXP=https://robinhoodchain.blockscout.com ;;
+  sol)  RPC=${DD_RPC_SOL:-https://api.mainnet-beta.solana.com}; CID=solana; DS=solana; EXP=https://solscan.io ;;
+  http*) RPC=$chain; CID=$(cast chain-id --rpc-url "$RPC"); DS=""; EXP="" ;;
+  *) echo "unknown chain $chain" >&2; exit 1 ;;
+esac
+C() { cast "$@" --rpc-url "$RPC" --rpc-headers "User-Agent: $UA"; }
+J() { curl -s -A "$UA" -H 'content-type: application/json' "$RPC" -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":${2:-[]}}"; }
+try() { "$@" 2>/dev/null || echo "-"; }
+
+goplus() {
+  if [[ $CID == solana ]]; then curl -s "https://api.gopluslabs.io/api/v1/solana/token_security?contract_addresses=$1"
+  else curl -s "https://api.gopluslabs.io/api/v1/token_security/$CID?contract_addresses=$1"; fi
+}
+pairs() {
+  [[ -z $DS ]] && return
+  echo "== DEX pairs (DexScreener) =="
+  curl -s "https://api.dexscreener.com/tokens/v1/$DS/$1" | jq -r '
+    sort_by(-(.liquidity.usd//0))[:8][] |
+    "\(.dexId)\t\(.pairAddress)\tliq $\(.liquidity.usd//0|floor)\tvol24 $\(.volume.h24//0|floor)\tFDV $\(.fdv//0|floor)\tcreated \((.pairCreatedAt//0)/1000|todate)\t\(.baseToken.symbol)/\(.quoteToken.symbol)"' 2>/dev/null || echo "none"
+}
+
+case $cmd in
+cast) C "$@" ;;
+audit)   # Serialized Audit verdict (LLM source/bytecode read + exit simulation). Key: $KIT/keys/serialized
+  KF=$KIT/keys/serialized; [[ -f $KF ]] || { echo "no Serialized Audit key — put it in $KF"; exit 1; }
+  case $chain in eth) SC=ETH;; base) SC=BASE;; rh) SC=ROBINHOOD;; sol) SC=SOLANA;; *) SC=${DD_SA_CHAIN:?set DD_SA_CHAIN};; esac
+  A=$(tr A-Z a-z <<<"${1:?address}"); [[ $chain == sol ]] && A=$1; CF=$KIT/cache/sa-$SC-$A.json; mkdir -p $KIT/cache
+  if [[ -s $CF && ${2:-} != --fresh ]]; then echo "(local cache $(date -r $CF '+%F %H:%M') — pass --fresh to re-spend credits)" >&2
+  else curl -s -m60 -H "X-Auth-Key: $(cat $KF)" "https://www.serializedaudit.io/api/audit-contract?chain=$SC&address=$1" > $CF.tmp
+       jq -e .audit $CF.tmp >/dev/null && mv $CF.tmp $CF || { cat $CF.tmp; rm -f $CF.tmp; exit 1; }; fi
+  jq . $CF ;;
+load-key)   # reads key from stdin; EVM hex or Solana base58 / JSON array. Stored in RAM (/dev/shm) only.
+  umask 077; mkdir -p $KEYDIR; k=$(cat)
+  if [[ $chain == sol ]]; then
+    node -e 'const bs58=require("bs58").default||require("bs58");let k=process.argv[1].trim();const b=k.startsWith("[")?JSON.parse(k):[...bs58.decode(k)];require("fs").writeFileSync(process.argv[2],JSON.stringify(b))' "$k" $KEYDIR/sol.json
+  else echo -n "$(tr -d " \n\r" <<<"$k")" > $KEYDIR/evm; fi
+  "$0" "$chain" wallet ;;
+wipe-key) shred -u $KEYDIR/* 2>/dev/null; rm -rf $KEYDIR; echo "burner keys wiped from RAM" ;;
+rpc)  J "$1" "${2:-[]}" | jq . ;;
+fork) anvil --fork-url "$RPC" --fork-header "User-Agent: $UA" --port "${1:-8545}" --silent & echo "fork of $chain on http://127.0.0.1:${1:-8545} (pid $!)" ;;
+wallet)
+  if [[ $chain == sol ]]; then
+    [[ -f $KEYDIR/sol.json ]] || { echo "no sol burner loaded"; exit 1; }
+    solana address -k $KEYDIR/sol.json; solana balance -k $KEYDIR/sol.json -u "$RPC"
+    spl-token accounts --owner "$(solana address -k $KEYDIR/sol.json)" -u "$RPC" 2>/dev/null || true
+  else
+    [[ -f $KEYDIR/evm ]] || { echo "no evm burner loaded"; exit 1; }
+    A=$(cast wallet address --private-key "$(cat $KEYDIR/evm)"); echo "$A"; C balance "$A" --ether
+  fi ;;
+token)
+  T=${1:?address}
+  if [[ $chain == sol ]]; then
+    echo "== Mint $T  ($EXP/token/$T) =="
+    acct=$(J getAccountInfo "[\"$T\",{\"encoding\":\"jsonParsed\"}]")
+    if [[ $(jq -r '.result.value.data.parsed.type // "x"' <<<"$acct") != mint ]]; then
+      echo "!! NOT A TOKEN MINT (account missing or wrong type) — raw: $(head -c 300 <<<"$acct")"; exit 1; fi
+    jq -r '.result.value as $v |
+      "program: \($v.owner)  (\(if $v.owner=="TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" then "Token-2022" else "SPL Token" end))",
+      "supply: \($v.data.parsed.info.supply) (decimals \($v.data.parsed.info.decimals))",
+      "MINT authority:   \($v.data.parsed.info.mintAuthority // "NONE (renounced)")",
+      "FREEZE authority: \($v.data.parsed.info.freezeAuthority // "NONE")",
+      "extensions: \([$v.data.parsed.info.extensions[]?.extension]|join(", ")|if .=="" then "none" else . end)",
+      ($v.data.parsed.info.extensions[]? | select(.extension|test("transferFee|permanentDelegate|transferHook|pausable|defaultAccountState")) | "  !! \(.extension): \(.state|tostring)")' <<<"$acct"
+    echo "== Top holders =="
+    J getTokenLargestAccounts "[\"$T\"]" | jq -r 'if .result then .result.value[:10][] | "\(.address)\t\(.uiAmountString)" else "unavailable on this RPC: \(.error.message)" end'
+  else
+    echo "== Contract $T  ($EXP/address/$T) =="
+    code=$(C code "$T"); echo "code size: $(( (${#code}-2)/2 )) bytes"
+    printf " name        %s\n symbol      %s\n decimals    %s\n totalSupply %s\n owner()     %s\n" \
+      "$(try C call $T 'name()(string)')" "$(try C call $T 'symbol()(string)')" "$(try C call $T 'decimals()(uint8)')" \
+      "$(try C call $T 'totalSupply()(uint256)')" "$(try C call $T 'owner()(address)')"
+    impl=$(C storage "$T" 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc)
+    adm=$(C storage "$T" 0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103)
+    bcn=$(C storage "$T" 0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50)
+    z=0x0000000000000000000000000000000000000000000000000000000000000000
+    [[ $impl != $z ]] && echo " !! EIP-1967 PROXY  impl=0x${impl:26}" || echo " proxy: no EIP-1967 impl slot"
+    [[ $adm  != $z ]] && echo " !! proxy admin=0x${adm:26}"
+    [[ $bcn  != $z ]] && echo " !! beacon=0x${bcn:26}"
+    zos=$(C storage "$T" 0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3)
+    [[ $zos != $z ]] && echo " !! legacy (zos) PROXY impl=0x${zos:26}"
+    [[ $code == 0x363d3d373d3d3d363d73* ]] && echo " !! EIP-1167 clone -> 0x${code:22:40}"
+    true
+  fi
+  echo "== GoPlus =="
+  goplus "$T" | jq -r --arg t "$(echo $T | tr A-Z a-z)" '.result | (.[$t] // .[(keys[0])] // {}) |
+    to_entries[] | select(.value|type!="array") | select(.value!="" and .value!=null) |
+    if (.value|type)=="object" then "\(.key): \(.value.status // (.value|tostring|.[:120]))\(if (.value.authority//[])|length>0 then "  authority=\(.value.authority|map(.address)|join(","))" else "" end)"
+    else "\(.key): \(.value)" end' 2>/dev/null | head -60
+  goplus "$T" | jq -r '.result[]? | (.lp_holders//[])[:6][] | "LP holder \(.address) \(.percent|tonumber*100|floor)% locked=\(.is_locked) \(.tag//"")"' 2>/dev/null || true
+  pairs "$T" ;;
+*) echo "unknown cmd $cmd" >&2; exit 1 ;;
+esac

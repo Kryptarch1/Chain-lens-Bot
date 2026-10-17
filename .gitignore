@@ -15,3 +15,9 @@ fixtures/out/
 fixtures/cache/
 __pycache__/
 *.pyc
+
+# --- old toolkit (kit/): dependencies, cached paid audits, token-specific watchers ---
+kit/node_modules/
+kit/cache/
+kit/watch/
+*.log

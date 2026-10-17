@@ -2,7 +2,7 @@
 
 # Chain-lens-Bot
 
-**On-chain due diligence for new EVM tokens — a verdict in seconds, verified on-chain.**
+**Token and project analysis for crypto hunters — on-chain verdicts in seconds, product claims tested, not trusted.**
 
 ![Python](https://img.shields.io/badge/python-3.12-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Chains](https://img.shields.io/badge/EVM_chains-14-6E56CF?style=for-the-badge&logo=ethereum&logoColor=white)
@@ -70,6 +70,17 @@ dd code base 0xYourToken setFees
 | `dd sell <chain> <token>` | Stateful sell tests only | ~1–5 s |
 | `dd trace <chain> <wallet>` | Where a wallet's money came from, across bridges | ~2–10 s |
 | `dd chains` | List supported chains | — |
+
+**Project analysis and toolkit** (`kit/`)
+
+| Command | What it does |
+|---|---|
+| `recon <site> [github] [--app <dapp>]` | Product fact sheet: crawls the site and dApp in a headless browser with a read-only wallet (captures and rejects any transaction or signature request), lists the contracts the dApp actually calls, the stack, fake-data signals, and GitHub activity |
+| `dd <chain> token <addr>` | One-shot contract snapshot: proxy, owner, authorities, DEX pairs |
+| `dd <chain> audit <addr>` | Serialized Audit verdict (paid credits; needs your own key) |
+| `dd <chain> fork [port]` | Local anvil fork for free dry runs |
+| `dd <chain> cast …` / `rpc …` | Raw `cast` / JSON-RPC with the chain's endpoint wired in |
+| `dd <chain> wallet` · `load-key` · `wipe-key` | Burner wallet for real product tests; the key is held in RAM only, never on disk |
 
 <sub>`--json` gives machine-readable output for `check` and `code`. \* First run on a contract is slower while its code is compiled or decompiled; results are cached.</sub>
 
@@ -159,11 +170,14 @@ dd check
 
 ## Installation
 
-**Requirements:** Linux · Python 3.12 · [Foundry](https://getfoundry.sh)
+**Requirements:** Linux · Python 3.12 · Node.js 20+ · [Foundry](https://getfoundry.sh)
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install aiohttp eth-abi eth-utils eth-hash pycryptodome slither-analyzer solc-select
+.venv/bin/pip install -r requirements.txt
+
+(cd kit && npm install && npx playwright install chromium)   # recon crawler
+ln -s "$PWD/kit/recon.js" /usr/local/bin/recon
 
 # Heimdall decompiler → tools/heimdall/heimdall
 #   https://github.com/Jon-Becker/heimdall-rs/releases  (heimdall-linux-amd64)
@@ -181,6 +195,7 @@ Keys live in `keys/` — one value per file, `chmod 600`, **never committed** (`
 | `keys/etherscan` | Etherscan V2 API key |
 | `keys/envio` | Envio HyperSync token |
 | `keys/rpc_<chain>` | Private RPC URL for a chain *(optional — public RPCs are the fallback)* |
+| `kit/keys/serialized` | Serialized Audit API key *(optional)* |
 
 Chain endpoints and settings live in `chains.json`.
 
@@ -213,10 +228,14 @@ bin/dd           command dispatcher
 cmds/            check · sim · sell · trace · code
 lib/             rpc · explorer · lp · quicksim · fastsell · sellsim · rugsim · v4hook · switches
                  tracer · slots · static (Slither) · decomp (Heimdall) · authority · who · trace · testnets
+kit/             project analysis (recon.js crawler) and the original toolkit (token · audit · fork · wallet)
 fixtures/src/    test tokens, malicious test hook, helper routers (Solidity)
 tests/           test suites
 chains.json      per-chain RPCs and settings
+requirements.txt Python dependencies
+docs/plans/      build plans and roadmap
 ARCHITECTURE.md  detailed reference
+CLAUDE.md        working rules for the AI analyst (AGENTS.md: same, for Codex)
 ```
 
 ---
