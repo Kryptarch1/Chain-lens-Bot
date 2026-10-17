@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🔍 Chain-lens-Bot
+# Chain-lens-Bot
 
 **On-chain due diligence for new EVM tokens — a verdict in seconds, verified on-chain.**
 
@@ -11,28 +11,28 @@
 ![Slither](https://img.shields.io/badge/Slither-verified_code-0F766E?style=for-the-badge)
 ![Heimdall](https://img.shields.io/badge/Heimdall-unverified_code-B45309?style=for-the-badge)
 
-[Quick start](#-quick-start) · [Commands](#-commands) · [What it checks](#%EF%B8%8F-what-it-checks) · [How it works](#%EF%B8%8F-how-it-works) · [Tests](#-tests)
+[Quick start](#quick-start) · [Commands](#commands) · [What it checks](#what-it-checks) · [How it works](#how-it-works) · [Tests](#tests)
 
 </div>
 
 ---
 
-## ✨ Overview
+## Overview
 
 Paste a contract address. Chain-lens answers the four questions that matter before you buy, verified on-chain with
 simulations and traces — websites, docs and scanners are never trusted (GoPlus appears only as a cross-check).
 **Nothing is ever broadcast.**
 
-| | Question | How it's answered |
-|:-:|---|---|
-| 🔒 | **Is the LP locked?** | Who holds the liquidity right now — v2 LP tokens, v3/v4 NFTs, lockers, hooks — and whether they can remove it |
-| 🧨 | **Any malicious functions?** | Every owner-only function is found, its callers identified, and its real effect simulated |
-| 🖨️ | **Mintable or ruggable?** | Hidden mints, supply raised since launch, LP pulls, sell-blocking owner switches, funds taken |
-| 🍯 | **Honeypot?** | Real buys and sells from fresh wallets — now, later, at two sizes, and after each owner power is switched on |
+| Question | How it's answered |
+|---|---|
+| **Is the LP locked?** | Who holds the liquidity right now — v2 LP tokens, v3/v4 NFTs, lockers, hooks — and whether they can remove it |
+| **Any malicious functions?** | Every owner-only function is found, its callers identified, and its real effect simulated |
+| **Mintable or ruggable?** | Hidden mints, supply raised since launch, LP pulls, sell-blocking owner switches, funds taken |
+| **Honeypot?** | Real buys and sells from fresh wallets — now, later, at two sizes, and after each owner power is switched on |
 
 ---
 
-## 🚀 Quick start
+## Quick start
 
 ```bash
 # check a token (≈3 s)
@@ -59,7 +59,7 @@ dd code base 0xYourToken setFees
 
 ---
 
-## 🧰 Commands
+## Commands
 
 | Command | What it does | Time |
 |---|---|:-:|
@@ -75,7 +75,7 @@ dd code base 0xYourToken setFees
 
 ---
 
-## 🌐 Supported chains
+## Supported chains
 
 | | | | | |
 |---|---|---|---|---|
@@ -87,13 +87,13 @@ Plus **14 testnets** for checking a deployer's test history.
 
 ---
 
-## 🛡️ What it checks
+## What it checks
 
 <table>
 <tr>
 <td valign="top" width="50%">
 
-**📜 Contract**
+**Contract**
 - Every function, named and classified
 - Who can call each privileged function
 - Owner type: wallet, Safe (n-of-m), timelock, roles
@@ -104,7 +104,7 @@ Plus **14 testnets** for checking a deployer's test history.
 </td>
 <td valign="top" width="50%">
 
-**💱 Trading**
+**Trading**
 - Buy / sell tax and who receives the cut
 - Sells at +0, +1, +10 blocks, +1 h, +24 h
 - Two sizes, a second wallet
@@ -116,7 +116,7 @@ Plus **14 testnets** for checking a deployer's test history.
 <tr>
 <td valign="top">
 
-**💧 Liquidity**
+**Liquidity**
 - v2 holders, v3/v4 positions and NFT owners
 - Lockers, contracts and hooks holding LP
 - Removal functions traced: pulls LP vs. collects fees
@@ -125,7 +125,7 @@ Plus **14 testnets** for checking a deployer's test history.
 </td>
 <td valign="top">
 
-**👤 People**
+**People**
 - Launch transaction and launchpad
 - Dev wallet age, activity, funds sent out
 - Money trail of the dev's funding
@@ -137,7 +137,7 @@ Plus **14 testnets** for checking a deployer's test history.
 
 ---
 
-## ⚙️ How it works
+## How it works
 
 ```text
 dd check
@@ -157,7 +157,7 @@ dd check
 
 ---
 
-## 📦 Installation
+## Installation
 
 **Requirements:** Linux · Python 3.12 · [Foundry](https://getfoundry.sh)
 
@@ -172,7 +172,7 @@ python3 -m venv .venv
 ln -s "$PWD/bin/dd" /usr/local/bin/dd
 ```
 
-### 🔑 Configuration
+### Configuration
 
 Keys live in `keys/` — one value per file, `chmod 600`, **never committed** (`keys/` is git-ignored).
 
@@ -186,7 +186,7 @@ Chain endpoints and settings live in `chains.json`.
 
 ---
 
-## 🧪 Tests
+## Tests
 
 ```bash
 .venv/bin/python tests/all.py              # everything        (~4 min)
@@ -206,7 +206,7 @@ Chain endpoints and settings live in `chains.json`.
 
 ---
 
-## 🗂️ Project layout
+## Project layout
 
 ```text
 bin/dd           command dispatcher
@@ -221,7 +221,7 @@ ARCHITECTURE.md  detailed reference
 
 ---
 
-## ⚠️ Limits
+## Limits
 
 - Findings marked **"read from code"** are inferred — simulations and traces are the proof.
 - Decompiled code is an interpretation; `dd code` adds a traced call as ground truth.
