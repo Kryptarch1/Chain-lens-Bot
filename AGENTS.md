@@ -119,3 +119,6 @@ Stop on drainer signs. Keys live only in RAM (/dev/shm); never print, log or sto
   feed of new deploys (/api/v1/contracts) for the future deploy radar. Decompile endpoint currently errors. Optional data only.
 - Etherscan V2 free key (3 calls/s): full history on eth, arb, sonic, hyper, monad, mega; source code only on
   base, bsc, op, avax, rh (wallet tx lists there need Etherscan Lite).
+
+## GitHub
+Repo: Kryptarch1/Chain-lens-Bot (private). After ANY change here: `git add -A` (includes deletions), commit, `git push origin main` — no need to ask. keys/, kit/keys/, data/, caches, .venv, node_modules are git-ignored and must never be pushed; scan new files for secrets first.
