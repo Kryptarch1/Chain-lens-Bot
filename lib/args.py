@@ -92,7 +92,9 @@ def traced_sets(args, addrs, stranger):
             if t == "address":
                 vals.append(ad)
             elif t.startswith(("uint", "int")):
-                vals.append(num if t.startswith("uint") or num < 2 ** 90 else 2 ** 90)
+                signed = t.startswith("int")
+                bits = int(t[3 if signed else 4:] or 256)
+                vals.append(min(num, 2 ** (bits - 1) - 1 if signed else 2 ** bits - 1))  # never exceed the type's range
             elif t == "bool":
                 vals.append(num != 0)
             else:

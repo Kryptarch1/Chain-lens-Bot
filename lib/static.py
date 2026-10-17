@@ -9,7 +9,7 @@ Findings are READ FROM CODE (inferred); simulations prove behaviour.
 import asyncio, json, os, re, sys, tempfile, shutil
 from lib import cache
 
-VERSION = 5
+VERSION = 6
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = os.path.join(ROOT, ".venv", "bin", "python")
 SOLC_SELECT = os.path.join(ROOT, ".venv", "bin", "solc-select")

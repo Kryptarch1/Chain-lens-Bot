@@ -113,6 +113,7 @@ Stop on drainer signs. Keys live only in RAM (/dev/shm); never print, log or sto
 - Envio HyperSync (free token in keys/envio, lib/hypersync.py): whole-chain logs + any wallet's full tx history on
   all our chains incl. BSC/Base/Robinhood/Sonic/MegaETH. Used automatically for big log ranges (>~8M blocks on
   Chainstack chains) and for wallet history where Etherscan free can't see it (BSC, Base, Avalanche, Robinhood).
+- Bridges (lib/trace.py, public APIs, no keys): a funding tx that is a bridge payout is matched to its deposit — Relay (api.relay.link, by tx hash), Across (app.across.to/api/deposits?recipient=, match fillTx), deBridge DLN (stats-api.dln.trade Orders/filteredList filter=<tx>, then the order: makerSrc + source chain; 7565164 = Solana). All three are queried in parallel on every hop.
 - xscan.cc (user's go-to ETH DD site; unofficial API, no key, lib/xscan.py): for eth/base/bsc contracts it indexed at
   deploy time — "same code deployed N times by M wallets" (scam-kit spraying) shown in the WHO section; also a live
   feed of new deploys (/api/v1/contracts) for the future deploy radar. Decompile endpoint currently errors. Optional data only.

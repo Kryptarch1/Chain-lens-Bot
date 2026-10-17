@@ -32,10 +32,10 @@ def code_of(c, selector):
     """-> {sig, source:[{where, name, code}], reads, writes, layout} for the public function with this selector."""
     from eth_utils import keccak
     target = None
-    for f in c.functions:
-        if f.visibility in ("public", "external") and not f.is_constructor:
-            if "0x" + keccak(text=f.solidity_signature)[:4].hex() == selector.lower():
-                target = f; break
+    hits = [f for f in c.functions if f.visibility in ("public", "external") and not f.is_constructor
+            and "0x" + keccak(text=f.solidity_signature)[:4].hex() == selector.lower()]
+    hits.sort(key=lambda f: not f.is_implemented)  # the real body before an interface declaration
+    target = hits[0] if hits else None
     if target is None:
         return {"error": f"no public function {selector} in {c.name}"}
     seen, parts = set(), []
