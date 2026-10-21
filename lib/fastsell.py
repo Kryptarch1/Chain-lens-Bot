@@ -21,7 +21,8 @@ V4H = "0x000000000000000000000000000000000004a4e1"
 BUYER, BUYER2 = sellsim.BUYER, sellsim.BUYER2
 KEY_T = v4hook.KEY_T
 FUNDS = hex(10 ** 22)
-FUNDS32 = "0x" + (10 ** 22).to_bytes(32, "big").hex()  # storage overrides need full 32-byte values on strict nodes
+FUNDS32 = "0x" + (10 ** 22).to_bytes(32, "big").hex()
+QUOTE_FUNDS32 = "0x" + (2 ** 200).to_bytes(32, "big").hex()  # storage overrides need full 32-byte values on strict nodes
 
 
 def _runtime(f, c):
@@ -92,7 +93,8 @@ class Plan:
                 ks = await asyncio.gather(*[balance_key(rpc, v4.quote, rpc.name, w) for w in (BUYER, BUYER2)])
                 if not all(ks):
                     return "could not find the quote token's balance storage to fund the test wallet"
-                self.ov[v4.quote] = {"stateDiff": {k: FUNDS32 for k in ks}}
+                # quote tokens can be worth fractions of a cent (PEPE): fund far more than any test buy needs
+                self.ov[v4.quote] = {"stateDiff": {k: QUOTE_FUNDS32 for k in ks}}
         else:
             self.v2 = await sellsim._v2_info(rpc, token, pool)
             self.kind = "v2" if self.v2 else "token"
