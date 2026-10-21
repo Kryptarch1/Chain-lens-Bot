@@ -276,7 +276,11 @@
    "etherscan": 143,
    "verify": true
   },
-  "dexscreener": "monad"
+  "dexscreener": "monad",
+  "v4": {
+   "pool_manager": "0x188d586ddcf52439676ca21a244753fa19f9ea8e",
+   "position_manager": "0x5b7ec4a94ff9bedb700fb82ab09d5846972f4016"
+  }
  },
  "arc": {
   "id": 5042,
