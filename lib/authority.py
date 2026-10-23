@@ -163,14 +163,15 @@ async def analyze(rpc, ex, token, info, fns, probes):
 
         from cmds.sim import calldata as worst_case
         tried = set()
-        for role in cand_roles:
-            ok_a, ar = await rpc.try_call(token, SEL["getRoleAdmin"] + role[2:])
-            if not (ok_a and ar and len(ar) >= 66):
-                continue
+        admins = await rpc.batch([("eth_call", [{"to": token, "data": SEL["getRoleAdmin"] + role[2:]}, "latest"]) for role in cand_roles])
+
+        async def one_role(role, ar):
+            if not (ar and len(ar) >= 66):
+                return
             adm = ar
             adm_members = await admin_members_of(adm)
             if not adm_members:
-                continue
+                return
             granter = adm_members[0]
             gdata = SEL["grantRole"] + role[2:] + granter[2:].rjust(64, "0")
             enabled = []
@@ -194,6 +195,7 @@ async def analyze(rpc, ex, token, info, fns, probes):
             if enabled:
                 out["grantable"].append({"role": role_name(role), "by": granter, "via": role_name(adm), "enables": enabled,
                                          "holders_now": len(rl.get(role, {}).get("members", []))})
+        await asyncio.gather(*[one_role(role, ar) for role, ar in zip(cand_roles, admins)])
     return out
 
 

@@ -263,7 +263,9 @@ class RPC:
                 out.sort(key=lambda l: (int(l["blockNumber"], 16), int(l.get("logIndex", "0x0"), 16)))
                 return out
             except Exception:
-                pass  # fall back to the RPC path
+                # HyperSync down or rate-limited: scanning years of history over RPC would take minutes, so cover a
+                # recent window only (callers treat a partial scan as partial: pool-liquidity guards, UNCLEAR)
+                from_block = max(from_block, to_block - self.logs_range * (100 if self.private else 30))
         return await self._rpc_logs(address, topics, from_block, to_block, concurrency)
 
     async def _rpc_logs(self, address, topics, from_block, to_block, concurrency=None):

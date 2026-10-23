@@ -42,6 +42,9 @@ async def _query(chain_id, q, max_pages=400):
         for attempt in range(3):
             try:
                 async with _sess().post(url, data=json.dumps(q)) as r:
+                    if r.status == 429 and attempt < 2:  # rate limited: short backoff, then retry
+                        await asyncio.sleep(1.0 * (attempt + 1))
+                        continue
                     if r.status != 200:
                         raise RuntimeError(f"hypersync http {r.status}: {(await r.text())[:120]}")
                     d = await r.json()

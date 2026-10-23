@@ -30,8 +30,7 @@ ERC721_TRANSFER = topic("Transfer(address,address,uint256)")
 async def estimate_block(rpc, ts, latest=None):
     """Rough block number at unix time ts using the recent average block time."""
     latest = latest or await rpc.block_number()
-    b1 = await rpc.block(latest)
-    b0 = await rpc.block(max(1, latest - 5000))
+    b1, b0 = await asyncio.gather(rpc.block(latest), rpc.block(max(1, latest - 5000)))
     t1, t0 = int(b1["timestamp"], 16), int(b0["timestamp"], 16)
     bt = max(0.05, (t1 - t0) / (latest - max(1, latest - 5000)))
     est = latest - int((t1 - ts) / bt)
@@ -48,11 +47,11 @@ async def contract_kind(rpc, ex, a):
     code = await rpc.code(a)
     if len(code) <= 2:
         return {"kind": "eoa", "name": "plain wallet (EOA)"}
-    src = await ex.source(a)
+    fns = ("owner()", "controller()", "admin()", "getOwner()")
+    src, rs = await asyncio.gather(ex.source(a), rpc.batch([("eth_call", [{"to": a, "data": encode_call(fn)}, "latest"]) for fn in fns]))
     owner = controller = None
-    for fn in ("owner()", "controller()", "admin()", "getOwner()"):
-        ok, r = await rpc.try_call(a, encode_call(fn))
-        if ok and r and r != "0x" and len(r) >= 66:
+    for fn, r in zip(fns, rs):
+        if r and r != "0x" and len(r) >= 66:
             v = to_addr(r)
             if v != ZERO:
                 if fn == "controller()":
@@ -142,51 +141,57 @@ async def v2_lp(rpc, ex, pair, creator=None):
     out["holders"].sort(key=lambda x: -x["pct"])
     burned = sum(h["pct"] for h in out["holders"] if h["who"] in ("dead", "zero"))
     out["burned_pct"] = burned
-    details = []
-    for h in out["holders"][:4]:
-        if h["who"] in ("dead", "zero"):
-            continue
+    async def inspect(h):
         info = await contract_kind(rpc, ex, h["address"])
         h["info"] = info
         if info["kind"] == "contract":
             info["removal"] = await removal_powers(rpc, info, h["address"])
+    await asyncio.gather(*[inspect(h) for h in out["holders"][:4] if h["who"] not in ("dead", "zero")])
     return out
 
 
 async def v3_lp(rpc, ex, pool, from_block, to_block, nfpm_hint=None):
-    logs = await rpc.get_logs(pool, [V3_MINT], from_block, to_block)
-    out = {"type": "v3", "pool": pool, "positions": [], "n_mints": len(logs)}
+    """Positions = the LARGEST mints (the Mint event carries the liquidity amount), so a busy pool's history is never
+    replayed: receipts of the top 40 mint txs in one batch, ownerOf/positions for every tokenId in one batch, then the
+    top 8 live positions are inspected in parallel."""
+    logs, pl = await asyncio.gather(rpc.get_logs(pool, [V3_MINT], from_block, to_block), rpc.try_call(pool, encode_call("liquidity()")))
+    out = {"type": "v3", "pool": pool, "positions": [], "n_mints": len(logs),
+           "pool_liquidity": int(pl[1], 16) if pl[0] and pl[1] and pl[1] != "0x" else None}
+    logs = sorted(logs, key=lambda l: -int(l["data"][2:][64:128], 16))  # by minted liquidity, biggest first
     nfpms = {}
     for l in logs:
         nfpms.setdefault(topic_addr(l["topics"][1]), []).append(l["transactionHash"])
+    codes = dict(zip(nfpms, await asyncio.gather(*[rpc.code(o) for o in nfpms])))
     for owner, txs in nfpms.items():
-        code = await rpc.code(owner)
-        if len(code) <= 2:
+        if len(codes[owner]) <= 2:
             out["positions"].append({"owner": owner, "kind": "eoa (direct position, no NFT)", "liq": None})
             continue
-        # assume NFPM: find tokenIds via IncreaseLiquidity in the same txs
+        txs = list(dict.fromkeys(txs))[:40]
         ids = set()
-        for h in txs[:20]:
-            r = await rpc.receipt(h)
-            for lg in r.get("logs", []):
+        for r in await rpc.batch([("eth_getTransactionReceipt", [h]) for h in txs]):
+            for lg in (r or {}).get("logs", []):
                 if lg["address"].lower() == owner.lower() and lg["topics"] and lg["topics"][0] == V3_INC:
                     ids.add(int(lg["topics"][1], 16))
-        for tid in sorted(ids):
-            ok, o = await rpc.try_call(owner, encode_call("ownerOf(uint256)", [tid]))
-            pos_ok, pos = await rpc.try_call(owner, encode_call("positions(uint256)", [tid]))
+        ids = sorted(ids)
+        reads = await rpc.batch([("eth_call", [{"to": owner, "data": encode_call(fn, [tid])}, "latest"]) for tid in ids for fn in ("ownerOf(uint256)", "positions(uint256)")])
+        for i, tid in enumerate(ids):
+            o, pos = reads[2 * i], reads[2 * i + 1]
             liq = None
-            if pos_ok and pos and len(pos) > 2:
+            if pos and len(pos) > 2:
                 try:
                     liq = decode_out("uint96,address,address,address,uint24,int24,int24,uint128,uint256,uint256,uint128,uint128", pos)[7]
                 except Exception:
                     pass
-            holder = to_addr(o) if ok and o and len(o) >= 66 else None
+            holder = to_addr(o) if o and len(o) >= 66 else None
             out["positions"].append({"nft": owner, "id": tid, "owner": holder or "BURNED (token does not exist)", "liq": liq})
-        for p in out["positions"]:
-            if p.get("owner") and p["owner"].startswith("0x") and p.get("liq"):
-                p["info"] = await contract_kind(rpc, ex, p["owner"])
-                if p["info"]["kind"] == "contract":
-                    p["info"]["removal"] = await removal_powers(rpc, p["info"], p["owner"])
+    out["positions"].sort(key=lambda p: -(p.get("liq") or 0))
+    live = [p for p in out["positions"] if p.get("owner") and p["owner"].startswith("0x") and p.get("liq")][:8]
+
+    async def inspect(p):
+        p["info"] = await contract_kind(rpc, ex, p["owner"])
+        if p["info"]["kind"] == "contract":
+            p["info"]["removal"] = await removal_powers(rpc, p["info"], p["owner"])
+    await asyncio.gather(*[inspect(p) for p in live])
     return out
 
 
@@ -298,10 +303,10 @@ async def v4_lp(rpc, ex, cfg, pool_id, from_block, to_block, seed_txs=(), init_h
     out["n_positions_seen"] = len(net)
     cur = await asyncio.gather(*[v4_current_liquidity(rpc, pm, pool_id, s_, a, b, sa) for (s_, a, b, sa) in top])
     live = sorted([(k, c) for k, c in zip(top, cur) if c], key=lambda x: -x[1])[:8]
-    for (sender, tl, tu, salt), liq in live:
+
+    async def one(k, liq):
+        sender, tl, tu, salt = k
         p = {"sender": sender, "liq": liq, "ticks": (tl, tu), "salt": salt}
-        if salt and False:
-            pass
         if posm and sender.lower() == posm.lower():
             tid = int(salt, 16)
             ok, o = await rpc.try_call(posm, encode_call("ownerOf(uint256)", [tid]))
@@ -313,7 +318,8 @@ async def v4_lp(rpc, ex, cfg, pool_id, from_block, to_block, seed_txs=(), init_h
             p["info"] = await contract_kind(rpc, ex, p["owner"])
             if p["info"]["kind"] == "contract":
                 p["info"]["removal"] = await removal_powers(rpc, p["info"], p["owner"], (out.get("key") or ())[:2])
-        out["positions"].append(p)
+        return p
+    out["positions"] = list(await asyncio.gather(*[one(k, liq) for k, liq in live]))
     out["positions"].sort(key=lambda x: -x["liq"])
     return out
 
@@ -345,7 +351,9 @@ def judge(lp):
     pos = lp.get("positions", [])
     rem = lp.get("removals") or []
     if lp["type"] == "v3" and pos and all((p.get("liq") == 0) for p in pos if isinstance(p.get("id"), int)) and any(isinstance(p.get("id"), int) for p in pos):
-        ids = ", ".join(f"#{p['id']}" for p in pos if isinstance(p.get("id"), int))
+        ids = ", ".join(f"#{p['id']}" for p in pos[:6] if isinstance(p.get("id"), int))
+        if (lp.get("pool_liquidity") or 0) > 1000:  # positions we found are empty but the pool is live: someone else holds it
+            return "UNCLEAR", [f"the {len(pos)} positions found hold 0 liquidity but the pool still has live liquidity — holder not identified"]
         return "PULLED", [f"ALL liquidity removed — position NFT {ids} now holds 0 liquidity (owner {pos[0].get('owner')})"]
     if not pos and lp.get("pool_liquidity"):
         return "UNCLEAR", ["pool still holds live liquidity but its owner position wasn't found (liquidity-event scan incomplete)"]
