@@ -33,7 +33,21 @@ RISKY_WORDS = ["mint", "blacklist", "blocklist", "whitelist", "pause", "unpause"
 
 
 def selectors_from_bytecode(code_hex):
-    """Use `cast selectors` (evmole) -> list of (selector, args, mutability). Falls back to PUSH4 scan."""
+    """Use `cast selectors` (evmole) -> list of (selector, args, mutability). Falls back to PUSH4 scan.
+    Cached per code hash: the same bytecode is asked for by the token check, every LP holder and the hook."""
+    from lib import cache
+    from eth_utils import keccak
+    key = "sels:" + keccak(bytes.fromhex(code_hex[2:] if code_hex.startswith("0x") else code_hex)).hex()
+    c = cache.get(key)
+    if c:
+        return [tuple(r) for r in c]
+    rows = _selectors_from_bytecode(code_hex)
+    if rows:
+        cache.set(key, rows)
+    return rows
+
+
+def _selectors_from_bytecode(code_hex):
     try:
         out = subprocess.run([CAST, "selectors", code_hex], capture_output=True, text=True, timeout=30).stdout
         rows = []

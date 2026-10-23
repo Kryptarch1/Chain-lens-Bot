@@ -1,7 +1,7 @@
 """Who is behind a token: launch tx, launcher contract, template, dev wallet profile, hook source summary.
 Everything runs in parallel and returns plain dicts; render() turns it into a few compact lines.
 """
-import asyncio, re, time
+import asyncio, re, sys, time
 from lib import sigs
 from lib.rpc import ZERO
 
@@ -134,7 +134,8 @@ async def gather_people(rpc, ex, token, info):
         dev = launch["from"]  # creator was a factory/launcher contract -> the human is whoever sent the launch tx
     from lib import trace as tracemod, xscan, testnets
     async def money_trail():
-        return await tracemod.trace(rpc.name, dev, max_hops=3) if dev else []
+        hops = 3 if "--deep" in sys.argv else 2  # a 3rd hop rarely changes the picture and costs ~2 s
+        return await tracemod.trace(rpc.name, dev, max_hops=hops) if dev else []
     async def test_history():
         return await asyncio.wait_for(testnets.scan(dev, info.get("impl_code") or info.get("code")), 15) if dev else {}
     res = await asyncio.gather(template_info(rpc, ex, info), dev_profile(rpc, ex, dev, token), money_trail(),

@@ -20,12 +20,24 @@ async def _get(path, timeout=6):
 
 
 async def lookup(chain, address):
-    """-> {'indexed', 'name', 'deployer', 'similar': [...], 'deployers': n, 'chains': {...}} or {} if unsupported/unknown."""
+    """-> {'indexed', 'name', 'deployer', 'similar': [...], 'deployers': n, 'chains': {...}} or {} if unsupported/unknown.
+    Optional data: time-boxed to 2.5 s (the site is often slow or down) and cached (1 h; a failure for 10 min)."""
     c = CHAIN.get(chain)
     if not c:
         return {}
+    from lib import cache
+    key = f"xscan:{chain}:{address.lower()}"
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    out = await _lookup(c, address)
+    cache.set(key, out, ttl=3600 if out.get("indexed") else 600)
+    return out
+
+
+async def _lookup(c, address):
     import asyncio
-    info, sim = await asyncio.gather(_get(f"{c}/{address}"), _get(f"{c}/{address}/similar", timeout=8))
+    info, sim = await asyncio.gather(_get(f"{c}/{address}", timeout=2.5), _get(f"{c}/{address}/similar", timeout=2.5))
     if not info or "error" in info:
         return {"indexed": False}
     sims = [x for x in ((sim or {}).get("results") or []) if x.get("address", "").lower() != address.lower() and x.get("chain") != "sepolia"]

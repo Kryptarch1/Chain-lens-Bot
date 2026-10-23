@@ -139,7 +139,7 @@ class Explorer:
         """-> {'name','verified','source','abi','proxy_impl'} (cached forever once verified)."""
         key = f"src:{self.chain}:{addr.lower()}"
         c = cache.get(key)
-        if c and c.get("verified"):
+        if c:  # verified: forever; unverified: 1 h (TTL set below) — saves a throttled explorer call per phase
             return c
         res = {"name": None, "verified": False, "source": "", "abi": None, "proxy_impl": None, "via": None}
         r = await self.es("contract", "getsourcecode", address=addr) or await self.rs_api("contract", "getsourcecode", address=addr)
@@ -154,8 +154,7 @@ class Explorer:
                 res.update(name=d.get("name"), verified=True, source=d.get("source_code", ""),
                            abi=json.dumps(d["abi"]) if d.get("abi") else None,
                            proxy_impl=(d.get("implementations") or [{}])[0].get("address") if d.get("implementations") else None, via="blockscout")
-        if res["verified"]:
-            cache.set(key, res)
+        cache.set(key, res, ttl=None if res["verified"] else 3600)
         return res
 
     async def creator(self, addr):
@@ -248,7 +247,17 @@ class Explorer:
         return []
 
     async def funded_by(self, addr):
-        """First inbound native transfer -> {'from','tx','time'} using txlist (asc)."""
+        """First inbound native transfer -> {'from','tx','time'} using txlist (asc). Cached: a wallet's first
+        funding never changes (a miss is retried after 10 min — the wallet may be brand new)."""
+        key = f"funded:{self.chain}:{addr.lower()}"
+        c = cache.get(key)
+        if c is not None:
+            return c
+        out = await self._funded_by(addr)
+        cache.set(key, out, ttl=None if out.get("from") else 600)
+        return out
+
+    async def _funded_by(self, addr):
         r = await self.es("account", "txlist", address=addr, sort="asc", page=1, offset=20) or \
             await self.rs_api("account", "txlist", address=addr, sort="asc", page=1, offset=20)
         rows = r if (r and isinstance(r, list)) else []

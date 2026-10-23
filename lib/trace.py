@@ -17,7 +17,7 @@ SOLANA_ID = 792703809
 async def relay_fill(tx_hash):
     """If tx_hash is a Relay payout, return the origin {chain_id, sender, amount, symbol, usd, in_tx}."""
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s:
             async with s.get(RELAY, params={"hash": tx_hash, "limit": 1}) as r:
                 d = await r.json(content_type=None)
     except Exception:
@@ -41,7 +41,7 @@ DLN_SOLANA = 7565164  # deBridge's id for Solana
 
 async def _get(url, params=None, method="GET", body=None):
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15), headers={"User-Agent": "dd-bot/1.0"}) as s:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5), headers={"User-Agent": "dd-bot/1.0"}) as s:
             async with s.request(method, url, params=params, json=body) as r:
                 return await r.json(content_type=None) if r.status == 200 else None
     except Exception:

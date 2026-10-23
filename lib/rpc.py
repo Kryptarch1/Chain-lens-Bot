@@ -103,8 +103,27 @@ class RPC:
         m = msg.lower()
         return any(w in m for w in self.RANGE_WORDS) and "revert" not in m
 
+    # immutable reads memoized for the life of the process: the same receipt / code / block is asked for by
+    # several phases of one check (creation receipt 2-3x, token code 5x). Pending results (None) are not stored.
+    _memo = {}
+    MEMO_METHODS = ("eth_getCode", "eth_getTransactionReceipt", "eth_getTransactionByHash", "eth_getBlockByNumber")
+
     async def call(self, method, params, urls=None):
         """JSON-RPC call. Reverts/range errors raise immediately; provider-limit errors move to the next endpoint."""
+        mk = None
+        # only real chains: forks reuse ports and addresses, so their code/receipts must never be memoized
+        if method in self.MEMO_METHODS and self.name in CHAINS and not (method == "eth_getBlockByNumber" and not str(params[0]).startswith("0x")):
+            mk = (self.name, method, json.dumps(params))
+            if mk in RPC._memo:
+                return RPC._memo[mk]
+        res = await self._call(method, params, urls)
+        if mk is not None and res is not None:
+            if len(RPC._memo) > 4000:
+                RPC._memo.clear()
+            RPC._memo[mk] = res
+        return res
+
+    async def _call(self, method, params, urls=None):
         self._id += 1
         last = None
         if urls is None and method == "eth_getLogs":
@@ -259,18 +278,17 @@ class RPC:
                 f["address"] = address
             if topics:
                 f["topics"] = topics
-            async with sem:
-                try:
+            try:
+                async with sem:  # hold a slot only for the request itself, never across the split below
                     return await self.call("eth_getLogs", [f])
-                except RPCError as err:
-                    if self._is_range_err(str(err)) or "limit" in str(err).lower():
-                        if e - s < 10:
-                            return []
-                        mid = (s + e) // 2
-                        a = await one(s, mid)
-                        b = await one(mid + 1, e)
-                        return a + b
-                    raise
+            except RPCError as err:
+                if self._is_range_err(str(err)) or "limit" in str(err).lower():
+                    if e - s < 10:
+                        return []
+                    mid = (s + e) // 2
+                    a, b = await asyncio.gather(one(s, mid), one(mid + 1, e))
+                    return a + b
+                raise
 
         for res in await asyncio.gather(*[one(s, e) for s, e in chunks]):
             out.extend(res)
