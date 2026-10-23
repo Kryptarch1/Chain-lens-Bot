@@ -6,7 +6,7 @@ import os, subprocess, sys, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = os.path.join(ROOT, ".venv", "bin", "python")
 SUITES = [("sell fixtures", "fixtures.py"), ("v4 hook fixtures", "hooks.py"), ("owner switches", "switches.py"),
-          ("decompiler", "decomp.py"), ("access gates", "gates.py"), ("dd code", "code.py"), ("roles", "roles.py"), ("pinned real hooks", "pinned.py")]
+          ("decompiler", "decomp.py"), ("access gates", "gates.py"), ("dd code", "code.py"), ("roles", "roles.py"), ("pinned real hooks", "pinned.py"), ("15 s budget", "budget.py")]
 if "--no-live" not in sys.argv:
     SUITES.append(("live smoke", "run.py"))
 

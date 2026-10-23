@@ -593,6 +593,15 @@ def answers(info, fns, probes, forkres, mints, lps):
     L.append(f"   Honeypot?         {hp}")
     L.append(f"   Mintable?         {mint_txt}")
     L.append(f"   Ruggable?         {'YES — ' + ', '.join(rug) if rug else 'no rug path found'}")
+    dev = ((forkres or {}).get("_who") or {}).get("dev") or {}
+    pc = dev.get("past_coins")
+    if pc:
+        dead = sum(1 for c in pc if c.get("dead"))
+        L.append(f"   Serial dev?       YES — {len(pc)} earlier coin{'s' if len(pc) > 1 else ''}, {dead} dead: " +
+                 ", ".join(f"{c['symbol']} {c['ca'][:6]}…{c['ca'][-4:]} ({'dead' if c.get('dead') else 'live'})" for c in pc[:4]) +
+                 (" …" if len(pc) > 4 else ""))
+    elif pc == [] and dev.get("history"):
+        L.append("   Serial dev?       NO — first coin from this wallet")
     return L
 
 

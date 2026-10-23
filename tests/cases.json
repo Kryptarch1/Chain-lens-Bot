@@ -205,5 +205,16 @@
    "LP PULLED"
   ],
   "why": "rugged ~7 min after launch; code shows owner-set maxBuy/pair that transfers read"
+ },
+ {
+  "name": "SERIAL-DEV",
+  "chain": "ink",
+  "token": "0xed3e488d61b9ec88bf4dd80961846d7c97e6e943",
+  "args": [],
+  "must_contain": [
+   "Serial dev?       YES \u2014 3 earlier coins",
+   "kazino.click (KAZINO) 0xca416726fe446e576bcfdd948d650f482a3262d7"
+  ],
+  "why": "NEXTIME: the dev launched 3 coins in the 3 hours before (through its own launch contract) \u2014 the $300 miss"
  }
 ]
