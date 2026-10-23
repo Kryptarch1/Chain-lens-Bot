@@ -197,10 +197,7 @@ async def phase_h(fork, rpc, ex, token, lps):
                 f.close()
         return await v4hook.analyze(fork, lp, token, hp)
 
-    res, dc = await asyncio.gather(run_it(), _hook_decomp(rpc, ex, lp["key"][4]))
-    if res is not None:
-        res["decomp"] = dc
-    return res
+    return await run_it()
 
 
 async def _hook_decomp(rpc, ex, hook):
@@ -273,7 +270,7 @@ async def phase_s(chain, token, info, probes, lps_task=None, ex=None):
     rpc = _R(chain)
     ex = ex or explorer.Explorer(chain)
     pool = pair["pairAddress"] if len(pair["pairAddress"]) == 42 else (rpc.cfg.get("v4") or {}).get("pool_manager")
-    lps = (await lps_task) if lps_task else []
+    lps = (await asyncio.shield(lps_task)) if lps_task else []
     v4 = None
     if lps and lps[0].get("type") == "v4" and lps[0].get("key") and len(pair["pairAddress"]) == 66:
         v4 = v4hook.Pool(lps[0], token, pool)
@@ -416,6 +413,8 @@ def verdict(info, fns, probes, forkres, mints, lps):
             warn.append(f"v4 hook can alter swaps ({', '.join(h['permissions'][:3])}) — {h.get('name')}" + ("" if h.get("verified") else ", UNVERIFIED"))
         if h and any(p in h["permissions"] for p in ("beforeRemoveLiquidity", "beforeAddLiquidity")):
             warn.append("v4 hook controls liquidity add/remove")
+    if any(e.startswith("code analysis") for e in info.get("_extra", [])):
+        warn.append("code analysis still running in the background — re-check shortly for the code-read findings")
     for lvl, m in switches.findings(info.get("switches")):
         (bad if lvl == "bad" else warn).append(m + " (simulated)")
     for lvl, m in decomp.findings(info.get("decomp")) + static.findings(info.get("static")):
@@ -687,12 +686,23 @@ def render(chain, token, info, fns, probes, cands, forkres, mints, lps, ex, t0):
 DEBUG = os.environ.get("DD_DEBUG")
 
 
+DEADLINE = [0.0]  # absolute time the whole check must be printed by (DD_BUDGET seconds, 0 = unlimited)
+BACKGROUND = ("slither", "decompile", "hook code")  # analyses that keep running detached and cache themselves (lib/bg.py)
+
+
 async def timed(name, coro, limit, default, notes):
+    """Run one phase with its own limit, clamped to the check's deadline. A timeout yields the phase's default and a
+    '<name> timed out' note — verdict() turns notes on core phases into INCOMPLETE, so partial output can't reassure."""
     t = time.time()
+    if DEADLINE[0]:
+        limit = max(0.5, min(limit, DEADLINE[0] - time.time()))
     try:
         r = await asyncio.wait_for(coro, limit)
     except asyncio.TimeoutError:
-        notes.append(f"{name} timed out after {limit}s")
+        if name in BACKGROUND:
+            notes.append(f"code analysis ({name}) finishing in background — re-check shortly for the code section")
+        else:
+            notes.append(f"{name} timed out after {limit:.0f}s")
         r = default
     except Exception as e:
         notes.append(f"{name} failed: {str(e)[:70]}")
@@ -704,6 +714,8 @@ async def timed(name, coro, limit, default, notes):
 
 async def main(chain, token, fast=False, as_json=False):
     t0 = time.time()
+    budget = float(os.environ.get("DD_BUDGET", "15"))
+    DEADLINE[0] = t0 + budget - 1.5 if budget > 0 else 0.0  # margin for interpreter start-up and printing
     rpc = RPC(chain)
     ex = explorer.Explorer(rpc.name)
     extra = []
@@ -714,43 +726,57 @@ async def main(chain, token, fast=False, as_json=False):
         print(f"could not read {token} on {rpc.name}: {'; '.join(extra)}"); return
     if len(info["code"]) <= 2:
         print(f"{token} has no code on {rpc.name} — not a contract"); return
+    # everything that needs only the reads starts now; functions/probes run alongside
     mints_task = asyncio.create_task(timed("mint history", phase_mints(rpc, token, info), 40, {}, extra))
     people_task = asyncio.create_task(timed("who", whomod.gather_people(rpc, ex, token, info), 20, {}, extra))
-    fns = await timed("functions", phase_b(info), 20, [], extra)
-    probes, cands = await timed("privilege probes", phase_c(rpc, token, info, fns), 30, ([], []), extra)
-    q_task = asyncio.create_task(timed("quick tests", phase_q(rpc, token, info, probes, fns), 20, None, extra))
     lps_task = asyncio.create_task(timed("LP", phase_e(rpc, ex, info), 75, [], extra))
     code_for = info.get("impl_code") or info["code"]
     unverified = not (info.get("source") or {}).get("verified")
     code_addr = info.get("impl") or token
-    dc_task = asyncio.create_task(timed("decompile", decomp.analyze(code_for), 35, None, extra)) if unverified and not fast else None
-    st_task = asyncio.create_task(timed("slither", static.analyze(ex, code_addr), 95, None, extra)) if not unverified and not fast else None
+    st_cached = static.cached(ex, code_addr) if not unverified else None
+    read_bytecode = unverified or bool((st_cached or {}).get("error"))  # unverified, or verified but it won't compile
+    dc_task = st_task = None
+    if not fast:
+        if read_bytecode:
+            dc_task = asyncio.create_task(timed("decompile", decomp.analyze(code_for), 35, None, extra))
+        if not unverified and not (st_cached or {}).get("error"):
+            st_task = asyncio.create_task(timed("slither", static.analyze(ex, code_addr), 95, None, extra))
+
+    async def hook_after():
+        return await whomod.hook_info(rpc, ex, await asyncio.shield(lps_task))
+    hook_task = asyncio.create_task(timed("hook info", hook_after(), 10, {}, extra))
+
+    async def hook_code_after():  # the hook's Slither/Heimdall view, no longer nested inside the sell tests
+        lps_ = await asyncio.shield(lps_task)
+        lp = next((l for l in lps_[:1] if l.get("type") == "v4" and l.get("key") and l["key"][4] != ZERO), None)
+        return await _hook_decomp(rpc, ex, lp["key"][4]) if lp else None
+    hc_task = asyncio.create_task(timed("hook code", hook_code_after(), 60, None, extra)) if not fast else None
+    fns = await timed("functions", phase_b(info), 20, [], extra)
+    probes, cands = await timed("privilege probes", phase_c(rpc, token, info, fns), 30, ([], []), extra)
+    no_sim = bool(rpc.cfg.get("no_sim"))  # chain has no eth_simulateV1: go straight to the fork, don't try first
+    q_task = None if no_sim else asyncio.create_task(timed("quick tests", phase_q(rpc, token, info, probes, fns), 20, None, extra))
+    d_task = asyncio.create_task(timed("fork tests", phase_d(rpc.name, token, info, probes, fns), 75, {"fork": False}, extra)) if no_sim else None
     s_task = asyncio.create_task(timed("sell tests", phase_s(rpc.name, token, info, probes, lps_task, ex), 90, {"note": "timed out"}, extra)) if not fast else None
     a_task = asyncio.create_task(timed("control", authority.analyze(rpc, ex, token, info, fns, probes), 25, {}, extra))
     lps = await lps_task
-    forkres = await q_task
+    forkres = (await q_task) if q_task else None
     sellres = await s_task if s_task else {"note": "deep sell tests not run — ask for a deep check (honeypot over time, sell caps, funds taken)"}
-    if forkres is None:  # chain lacks eth_simulateV1 -> short fork test (honeypot + owner fns)
-        forkres = await timed("fork tests", phase_d(rpc.name, token, info, probes, fns), 75, {"fork": False}, extra)
-    if not fast and False:
-        pass
+    if forkres is None:  # chain lacks eth_simulateV1 (flagged, or just found out) -> the same tests on a fork
+        forkres = await d_task if d_task else await timed("fork tests", phase_d(rpc.name, token, info, probes, fns), 75, {"fork": False}, extra)
     mints = await mints_task
-    info["decomp"] = (await dc_task) if dc_task else (decomp.cached(code_for) if unverified else None)
-    info["static"] = (await st_task) if st_task else (static.cached(ex, code_addr) if not unverified else None)
-    if (info["static"] or {}).get("error") and not fast:  # verified but would not compile -> decompile the bytecode instead
-        info["decomp"] = await timed("decompile", decomp.analyze(code_for), 35, None, extra)
+    info["decomp"] = (await dc_task) if dc_task else (decomp.cached(code_for) if read_bytecode else None)
+    info["static"] = (await st_task) if st_task else st_cached
     # owner switches Slither found: flip each one in storage and see if a holder can still sell (needs eth_simulateV1)
     if (info["static"] or {}).get("ok") and forkres and (forkres.get("tax") or {}).get("buy_ok") and forkres.get("quick"):
         hp = {"buy_ok": True, "amount": forkres["tax"]["amount"], "got": forkres["tax"]["got"]}
         info["switches"] = await timed("switch tests", switches.run(rpc, token, forkres["tax"]["pool"], hp, info["static"], probes), 15, None, extra)
+    if hc_task and isinstance(sellres.get("hook"), dict):
+        sellres["hook"]["decomp"] = await hc_task
     forkres = forkres or {"fork": False}
     forkres["sell"] = sellres
     forkres["auth"] = await a_task
     whoinfo = await people_task or {}
-    try:
-        whoinfo["hook"] = await asyncio.wait_for(whomod.hook_info(rpc, ex, lps), 10)
-    except Exception:
-        whoinfo["hook"] = {}
+    whoinfo["hook"] = await hook_task or {}
     forkres["_who"] = whoinfo
     if as_json:
         print(json.dumps({"info": {k: v for k, v in info.items() if k not in ("code", "impl_code", "source", "goplus", "pairs", "decomp", "static", "switches")},

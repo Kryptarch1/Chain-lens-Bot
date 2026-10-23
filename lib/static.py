@@ -6,7 +6,7 @@ native sends, delegatecall/selfdestruct. Plus the map that matters most for hold
                       trading flags, limits, the pair, external checker contracts) — and which function sets each.
 Findings are READ FROM CODE (inferred); simulations prove behaviour.
 """
-import asyncio, json, os, re, sys, tempfile, shutil
+import asyncio, json, os, re, subprocess, sys, tempfile, shutil, time
 from lib import cache
 
 VERSION = 7
@@ -52,10 +52,27 @@ async def analyze(ex, addr, timeout=90):
     settings = sf.get("settings") or {"optimizer": {"enabled": sf.get("optimizer"), "runs": sf.get("runs", 200)}}
     if sf.get("evm") and sf["evm"] not in ("default", "") and "evmVersion" not in settings:
         settings["evmVersion"] = sf["evm"]
-    out = await _work(sf["files"], settings, solc, sf.get("name"), timeout)
+    out = await _work(sf["files"], settings, solc, sf.get("name"), timeout, bg_key=key)
     if out.get("ok"):
         cache.set(key, json.dumps(out))
+    elif out.get("error") and "timed out" not in out["error"]:  # won't compile: don't repay the cost every run
+        cache.set(key, json.dumps(out), ttl=86400)
     return out
+
+
+async def _poll(p, timeout):
+    """Wait for a Popen child without blocking the loop; raises TimeoutError after `timeout` s."""
+    t = time.time()
+    while p.poll() is None:
+        if time.time() - t > timeout:
+            raise asyncio.TimeoutError()
+        await asyncio.sleep(0.2)
+
+
+def detach(kind, path, key):
+    """Hand a still-running analysis to a detached finisher (lib/bg.py) that caches its result when it lands."""
+    subprocess.Popen([PY, "-m", "lib.bg", kind, path, key], cwd=ROOT, start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 async def code(ex, addr, selector, timeout=90):
@@ -91,24 +108,34 @@ async def analyze_local(files, version, name, settings=None, timeout=90):
     return await _work(files, settings or {"optimizer": {"enabled": True, "runs": 200}}, solc, name, timeout)
 
 
-async def _work(files, settings, solc, name, timeout, extra=None):
+async def _work(files, settings, solc, name, timeout, extra=None, bg_key=None):
     d = tempfile.mkdtemp(prefix="sl-")
+    keep = False
     try:
         inp, outp = os.path.join(d, "in.json"), os.path.join(d, "out.json")
         json.dump({"files": files, "settings": settings, "solc": solc, "name": name, "workdir": d, **(extra or {})}, open(inp, "w"))
-        p = await asyncio.create_subprocess_exec(PY, os.path.join(ROOT, "lib", "static_worker.py"), inp, outp, cwd=d,
-                                                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        # plain Popen (not asyncio's): the worker must outlive this process when the budget hands it to the finisher
+        p = subprocess.Popen([PY, os.path.join(ROOT, "lib", "static_worker.py"), inp, outp], cwd=d,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         try:
-            _, err = await asyncio.wait_for(p.communicate(), timeout)
+            await _poll(p, timeout)
         except asyncio.TimeoutError:
             p.kill()
             return {"error": f"slither timed out after {timeout}s"}
+        except asyncio.CancelledError:  # the check's budget ran out: let the compile finish on its own and cache itself
+            if bg_key:
+                keep = True
+                detach("slither", outp, bg_key)
+            else:
+                p.kill()
+            raise
         if not os.path.exists(outp):
             last = (err or b"").decode(errors="ignore").strip().splitlines()[-1:] or ["?"]
             return {"error": f"slither failed: {last[0][:120]}"}
         out = json.load(open(outp))
     finally:
-        shutil.rmtree(d, ignore_errors=True)
+        if not keep:
+            shutil.rmtree(d, ignore_errors=True)
     out["ok"] = True
     return out
 

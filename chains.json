@@ -159,7 +159,8 @@
   "logs_rpc": [
    "https://avalanche-c-chain-rpc.publicnode.com"
   ],
-  "wnative": "0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7"
+  "wnative": "0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7",
+  "no_sim": true
  },
  "sonic": {
   "id": 146,
@@ -262,7 +263,8 @@
    "blockscout": "https://megaeth.blockscout.com",
    "verify": true
   },
-  "dexscreener": "megaeth"
+  "dexscreener": "megaeth",
+  "no_sim": true
  },
  "monad": {
   "id": 143,
@@ -280,7 +282,8 @@
   "v4": {
    "pool_manager": "0x188d586ddcf52439676ca21a244753fa19f9ea8e",
    "posm": "0x5b7ec4a94ff9bedb700fb82ab09d5846972f4016"
-  }
+  },
+  "no_sim": true
  },
  "arc": {
   "id": 5042,

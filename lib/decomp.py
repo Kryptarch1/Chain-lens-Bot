@@ -21,20 +21,32 @@ def available():
     return os.path.exists(BIN)
 
 
-async def _run(code_hex, timeout):
+async def _run(code_hex, timeout, bg_key=None):
     d = tempfile.mkdtemp(prefix="hd-")
+    keep = False
     try:
-        p = await asyncio.create_subprocess_exec(BIN, "decompile", code_hex, "--include-sol", "--output", d, "-q", "--timeout", "2000",
-                                                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, cwd=d)
+        import subprocess
+        from lib.static import _poll
+        p = subprocess.Popen([BIN, "decompile", code_hex, "--include-sol", "--output", d, "-q", "--timeout", "2000"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=d, start_new_session=True)
         try:
-            await asyncio.wait_for(p.wait(), timeout)
+            await _poll(p, timeout)
         except asyncio.TimeoutError:
             p.kill()
             return None
+        except asyncio.CancelledError:  # the check's budget ran out: let Heimdall finish and cache itself
+            if bg_key:
+                keep = True
+                from lib.static import detach
+                detach("heimdall", os.path.join(d, "decompiled.sol"), bg_key)
+            else:
+                p.kill()
+            raise
         f = os.path.join(d, "decompiled.sol")
         return open(f).read() if os.path.exists(f) else None
     finally:
-        shutil.rmtree(d, ignore_errors=True)
+        if not keep:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 def _split(sol):
@@ -123,21 +135,27 @@ async def analyze(code_hex, timeout=25):
     c = cache.get(key)
     if c:
         return json.loads(c) if isinstance(c, str) else c
-    sol = await _run(code_hex, timeout)
+    sol = await _run(code_hex, timeout, bg_key=key)
     if not sol:
+        cache.set(key, json.dumps({"ok": False, "error": "decompiler produced no output"}), ttl=86400)
         return None
+    return await finish(sol, key)
+
+
+async def finish(sol, key):
+    """Parse a decompile and cache it under its code-hash key (also used by the detached finisher, lib/bg.py)."""
     fns = {sel: _features(sel, sig, body) for sel, sig, body in _split(sol)}
     names = await sigs.names_for(list(fns))
     for sel, f in fns.items():
         f["name"] = names.get(sel) or f"unnamed {sel}"
-    out = {"ok": True, "code_hash": h, "fns": fns}
+    out = {"ok": True, "code_hash": key.split(":")[-1], "fns": fns}
     cache.set(key, json.dumps(out))
     return out
 
 
 def findings(d):
     """High-signal facts read from code (not executed). -> [(level, text)]"""
-    if not d:
+    if not d or not d.get("ok"):
         return []
     out = []
     for sel, f in d["fns"].items():
@@ -180,6 +198,8 @@ def transfer_reverts(d):
 def render(d, only_privileged=True):
     if not d:
         return []
+    if not d.get("ok"):
+        return [f"== CODE (decompiled): not available — {d.get('error', 'decompile failed')}"]
     L = [f"== CODE (decompiled with Heimdall — read from bytecode, not executed)"]
     for lvl, msg in findings(d):
         L.append(f"   {'✗' if lvl == 'bad' else '!'} {msg}")

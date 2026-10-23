@@ -15,7 +15,8 @@ for c in cases:
     if only and c["name"] not in only:
         continue
     t = time.time()
-    p = subprocess.run([PY, os.path.join(ROOT, "cmds", c.get("cmd", "check") + ".py"), c["chain"], c["token"]] + c.get("args", []), capture_output=True, text=True, timeout=400)
+    p = subprocess.run([PY, os.path.join(ROOT, "cmds", c.get("cmd", "check") + ".py"), c["chain"], c["token"]] + c.get("args", []), capture_output=True, text=True, timeout=400,
+                       env={**os.environ, "DD_BUDGET": "120"})  # accuracy suite: cold DEEP cases may legitimately exceed 15 s
     out = p.stdout
     dt = time.time() - t
     problems = []
