@@ -602,6 +602,14 @@ def answers(info, fns, probes, forkres, mints, lps):
                  (" …" if len(pc) > 4 else ""))
     elif pc == [] and dev.get("history"):
         L.append("   Serial dev?       NO — first coin from this wallet")
+    who = (forkres or {}).get("_who") or {}
+    if who.get("farcaster"):
+        from lib import farcaster
+        role, addr, u = who["farcaster"][0]
+        L.append(f"   Dev identity?     {role.upper() if role == 'dev' else role}: {farcaster.describe(u)} on Farcaster"
+                 f" — {'owns the account' if u['how'] == 'custody' else 'signed proof the wallet is theirs'}")
+    elif who.get("farcaster_checked"):
+        L.append("   Dev identity?     no Farcaster account linked to the dev or its funders")
     return L
 
 

@@ -216,5 +216,16 @@
    "kazino.click (KAZINO) 0xca416726fe446e576bcfdd948d650f482a3262d7"
   ],
   "why": "NEXTIME: the dev launched 3 coins in the 3 hours before (through its own launch contract) \u2014 the $300 miss"
+ },
+ {
+  "name": "FARCASTER-DEV",
+  "chain": "rh",
+  "token": "0xd086f891229cd123aadfcae7c4b40150a80fd9d7",
+  "args": [],
+  "must_contain": [
+   "Dev identity?     DEV: @benleventhal",
+   "verified (signed) by @benleventhal"
+  ],
+  "why": "PIZZA: dev wallet 0x1541\u20267d59 is a Farcaster-verified address of @benleventhal (Blackbird founder) \u2014 identity proof the explorer never shows"
  }
 ]

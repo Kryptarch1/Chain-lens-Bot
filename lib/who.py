@@ -207,8 +207,16 @@ async def gather_people(rpc, ex, token, info):
     async def test_history():
         return await asyncio.wait_for(testnets.scan(dev, info.get("impl_code") or info.get("code")), 15) if dev else {}
     res = await asyncio.gather(template_info(rpc, ex, info), dev_profile(rpc, ex, dev, token), money_trail(),
-                               xscan.lookup(rpc.name, token), test_history(), return_exceptions=True)
-    tpl, devp, trail, xs, tn = [r if not isinstance(r, Exception) else {} for r in res]
+                               xscan.lookup(rpc.name, token), test_history(), farcaster_ids([dev]), return_exceptions=True)
+    tpl, devp, trail, xs, tn, fc = [r if not isinstance(r, Exception) else {} for r in res]
+    fc = dict(fc or {})
+    wallets = [(h.get("bridge") or {}).get("sender") or h.get("funder") for h in trail or [] if not h.get("end")]
+    wallets = [a for a in wallets if a and a.lower() not in fc]
+    if wallets:  # funders of the dev: one more batched (cached) call, after the trail is known
+        try:
+            fc.update(await farcaster_ids(wallets))
+        except Exception:
+            pass
     launch_ts = None
     if launch.get("tx"):
         try:
@@ -217,7 +225,20 @@ async def gather_people(rpc, ex, token, info):
             launch_ts = int(b["timestamp"], 16)
         except Exception:
             pass
-    return {"launch": launch, "template": tpl, "dev": devp, "trail": trail or [], "xscan": xs or {}, "testnets": tn or {}, "launch_ts": launch_ts}
+    found = []
+    for role, a in [("dev", dev)] + [(f"funder{'' if i == 0 else f' (hop {i+1})'}", w) for i, w in enumerate(
+            (h.get("bridge") or {}).get("sender") or h.get("funder") for h in trail or [] if not h.get("end"))]:
+        if a and fc.get(a.lower()):
+            found.append((role, a, fc[a.lower()]))
+    return {"launch": launch, "template": tpl, "dev": devp, "trail": trail or [], "xscan": xs or {}, "testnets": tn or {},
+            "launch_ts": launch_ts, "farcaster": found, "farcaster_checked": dev is not None and dev.lower() in fc}
+
+
+async def farcaster_ids(addrs):
+    """Farcaster accounts that verified these wallets (time-boxed: optional data)."""
+    from lib import farcaster
+    addrs = [a for a in addrs if a]
+    return await asyncio.wait_for(farcaster.lookup(addrs), 3.5) if addrs else {}
 
 
 async def gather_all(rpc, ex, token, info, lps):
@@ -264,7 +285,8 @@ def render(w, ex, sym):
             L.append("   earlier coins by this dev: could not be checked (receipts unavailable)")
         for lc in d.get("launch_calls", [])[:3]:
             L.append(f"   earlier: {time.strftime('%m-%d %H:%M', time.gmtime(lc['time']))} {lc['fn']} → {lc['to']}")
-    from lib import xscan, testnets
+    from lib import xscan, testnets, farcaster
+    L.extend(farcaster.render(w.get("farcaster") or []))
     L.extend(xscan.render(w.get("xscan")))
     L.extend(testnets.render(w.get("testnets"), w.get("launch_ts")))
     if hk and hk.get("swap_fee_pct"):
