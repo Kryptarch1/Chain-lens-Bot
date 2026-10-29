@@ -76,3 +76,20 @@ def event_set_many(d):
         conn().executemany("INSERT OR REPLACE INTO events (topic, name) VALUES (?,?)",
                            [(k.lower(), v) for k, v in d.items()])
         conn().commit()
+
+
+_inflight = {}
+
+
+async def once(k, make):
+    """Single-flight: concurrent callers with the same key share ONE run of make() (a coroutine factory) in this
+    process. Parallel phases often ask for the same wallet history / funding at the same moment — one request, not
+    two, against rate-limited APIs (HyperSync: 15 requests/min on the free plan)."""
+    import asyncio
+    loop = asyncio.get_running_loop()
+    key = (id(loop), k)
+    fut = _inflight.get(key)
+    if fut is None:
+        fut = _inflight[key] = asyncio.ensure_future(make())
+        fut.add_done_callback(lambda _f: _inflight.pop(key, None))
+    return await asyncio.shield(fut)

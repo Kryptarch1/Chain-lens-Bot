@@ -2,7 +2,7 @@
 Token in keys/envio (never printed). Endpoint per chain: https://<chainId>.hypersync.xyz
 Results are converted to eth_getLogs / explorer-txlist shapes so callers don't care where data came from.
 """
-import asyncio, json, os
+import asyncio, json, os, time
 import aiohttp
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -34,30 +34,47 @@ async def close():
 
 
 async def _query(chain_id, q, max_pages=400):
-    """Paginate a HyperSync query. -> (list of data items, archive_height)"""
+    """Paginate a HyperSync query. -> (list of data items, archive_height). Identical concurrent queries share one run."""
+    from lib import cache
+    return await cache.once(("hs", chain_id, json.dumps(q, sort_keys=True), max_pages), lambda: _query_run(chain_id, q, max_pages))
+
+
+DEADLINE = [0.0]  # absolute time a caller must be done by (set by dd check from DD_BUDGET; 0 = none)
+
+
+async def _post(url, q):
+    """One HyperSync request. On 429 (free plan: 15 requests/min, shared by all chains) wait for the window reset
+    when that still fits the caller's deadline — a short wait beats a partial scan (UNCLEAR LP) — else raise."""
+    for attempt in range(4):
+        try:
+            async with _sess().post(url, data=json.dumps(q)) as r:
+                if r.status == 429 and attempt < 3:
+                    wait = min(float(r.headers.get("X-RateLimit-Reset") or 1) + 0.3, 61)
+                    if DEADLINE[0] and time.time() + wait > DEADLINE[0] - 1:
+                        raise RuntimeError("hypersync rate limited (window resets too late for this check)")
+                    await asyncio.sleep(wait)
+                    continue
+                if r.status != 200:
+                    raise RuntimeError(f"hypersync http {r.status}: {(await r.text())[:120]}")
+                return await r.json()
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            if attempt >= 2:
+                raise
+            await asyncio.sleep(0.5 * (attempt + 1))
+    raise RuntimeError("hypersync rate limited")
+
+
+async def _query_run(chain_id, q, max_pages):
     url = f"https://{chain_id}.hypersync.xyz/query"
     out, ah = [], None
     end = q.get("to_block")
     for _ in range(max_pages):
-        for attempt in range(3):
-            try:
-                async with _sess().post(url, data=json.dumps(q)) as r:
-                    if r.status == 429 and attempt < 2:  # rate limited: short backoff, then retry
-                        await asyncio.sleep(1.0 * (attempt + 1))
-                        continue
-                    if r.status != 200:
-                        raise RuntimeError(f"hypersync http {r.status}: {(await r.text())[:120]}")
-                    d = await r.json()
-                break
-            except (aiohttp.ClientError, asyncio.TimeoutError):
-                if attempt == 2:
-                    raise
-                await asyncio.sleep(0.5 * (attempt + 1))
+        d = await _post(url, q)
         out += d.get("data", [])
         ah = d.get("archive_height", ah)
         nb = d.get("next_block")
-        if not nb or (end and nb >= end) or (ah and nb >= ah):
-            break
+        if not nb or nb <= q.get("from_block", 0) or (end and nb >= end) or (ah and nb >= ah):
+            break  # done, or no progress (asked beyond the indexed tip)
         q = dict(q, from_block=nb)
     return out, ah
 
@@ -112,15 +129,17 @@ async def txlist(chain_id, addr, from_block=0, with_time=True):
 
 async def first_funding(chain_id, addr, max_pages=6):
     """Earliest inbound native transfer to `addr` (reads only the first pages of its history)."""
+    from lib import cache
+    return await cache.once(("hsff", chain_id, addr.lower(), max_pages), lambda: _first_funding(chain_id, addr, max_pages))
+
+
+async def _first_funding(chain_id, addr, max_pages):
     a = addr.lower()
     q = {"from_block": 0, "transactions": [{"to": [a]}],
          "field_selection": {"transaction": ["block_number", "hash", "from", "to", "value"], "block": ["number", "timestamp"]}}
     url = f"https://{chain_id}.hypersync.xyz/query"
     for _ in range(max_pages):
-        async with _sess().post(url, data=json.dumps(q)) as r:
-            if r.status != 200:
-                return {}
-            d = await r.json()
+        d = await _post(url, q)  # rate limit / outage raises: the caller must not cache "never funded"
         ts = {}
         for item in d.get("data", []):
             for b in item.get("blocks", []) or []:

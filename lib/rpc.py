@@ -252,12 +252,12 @@ class RPC:
             from_block = max(from_block, to_block - max_blocks)
         from lib import hypersync
         span = to_block - from_block
-        # Chainstack (250 req/s, parallel 10k-block chunks) wins up to ~800 chunks; HyperSync wins beyond that,
-        # and on chains without a private endpoint
-        use_hs = span > self.logs_range * (800 if self.private else 3)
+        # Chainstack wins for a few dozen chunks; beyond that HyperSync (one request) is faster. Per-chunk latency
+        # varies a lot by chain (eth 10k blocks ~0.1 s, monad ~0.6 s: 368 chunks took 45 s and timed out the LP scan)
+        use_hs = span > self.logs_range * (40 if self.private else 3)
         if hypersync.available(self.cfg.get("id")) and use_hs:
             try:
-                hs_logs, covered = await hypersync.get_logs(self.cfg["id"], address, topics, from_block, to_block)
+                hs_logs, covered = await self._hs_logs(address, topics, from_block, to_block)
                 tail = await self._rpc_logs(address, topics, covered + 1, to_block, concurrency) if covered < to_block else []
                 out = hs_logs + tail
                 out.sort(key=lambda l: (int(l["blockNumber"], 16), int(l.get("logIndex", "0x0"), 16)))
@@ -267,6 +267,32 @@ class RPC:
                 # recent window only (callers treat a partial scan as partial: pool-liquidity guards, UNCLEAR)
                 from_block = max(from_block, to_block - self.logs_range * (100 if self.private else 30))
         return await self._rpc_logs(address, topics, from_block, to_block, concurrency)
+
+    async def _hs_logs(self, address, topics, from_block, to_block):
+        """HyperSync logs with (1) a persistent cache of what was already scanned — logs older than 64 blocks never
+        change, so a re-check only scans the new blocks — and (2) the remaining span split into 4 parallel queries
+        (one 17M-block PoolManager scan: 6.1 s alone, 2.9 s as 4; HyperSync time grows with the span)."""
+        from lib import hypersync, cache
+        key = f"hslogs:{self.cfg['id']}:{json.dumps([address, topics], sort_keys=True).lower()}:{from_block}"
+        c = cache.get(key) or {}
+        logs, start = (c["logs"], c["to"] + 1) if c.get("to", -1) >= from_block else ([], from_block)
+        covered = start - 1
+        if start <= to_block:
+            n = 4 if to_block - start > 8_000_000 else 1  # each part costs 1 of the 15 HyperSync requests/min
+            step = (to_block - start) // n + 1
+            parts = await asyncio.gather(*[hypersync.get_logs(self.cfg["id"], address, topics, s, min(to_block, s + step - 1))
+                                           for s in range(start, to_block + 1, step)])
+            for i, (lg, cov) in enumerate(parts):
+                logs = logs + lg
+                covered = cov
+                if cov < min(to_block, start + (i + 1) * step - 1):
+                    break  # this part isn't fully indexed yet: later parts would leave a gap, the RPC tail covers it
+            logs = [l for l in logs if int(l["blockNumber"], 16) <= covered]
+        safe = covered - 64  # keep only reorg-safe blocks in the cache
+        if safe > c.get("to", -1) and safe >= from_block:
+            cache.set(key, {"to": safe, "logs": [l for l in logs if int(l["blockNumber"], 16) <= safe]}, ttl=7 * 86400)
+        covered = min(covered, to_block)
+        return [l for l in logs if int(l["blockNumber"], 16) <= covered], covered
 
     async def _rpc_logs(self, address, topics, from_block, to_block, concurrency=None):
         rng = self.logs_range

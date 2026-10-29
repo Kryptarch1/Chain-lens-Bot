@@ -42,7 +42,7 @@ def _fee_constants(src):
     return out[:6]
 
 
-async def launch_info(rpc, ex, info):
+async def launch_info(rpc, ex, info, light=False):
     """Decode the token's creation tx: who sent it, to which contract, which function, value."""
     h = info.get("created_tx")
     if not h:
@@ -52,12 +52,18 @@ async def launch_info(rpc, ex, info):
         return {}
     sel = (tx.get("input") or "0x")[:10]
     to = tx.get("to")
-    out = {"tx": h, "from": tx["from"], "to": to, "value": int(tx["value"], 16), "fn": await _fn_name(sel) if len(sel) == 10 else "create"}
-    if to:
-        src = await ex.source(to)
-        out["to_name"] = src.get("name") or ("unverified contract" if len(await rpc.code(to)) > 2 else "EOA")
-        out["to_verified"] = src.get("verified")
+    out = {"tx": h, "from": tx["from"], "to": to, "value": int(tx["value"], 16), "fn": await _fn_name(sel) if len(sel) == 10 else "create",
+           "block": int(tx["blockNumber"], 16) if tx.get("blockNumber") else None}
+    if to and not light:
+        await launch_target(rpc, ex, out)
     return out
+
+
+async def launch_target(rpc, ex, out):
+    """Name of the contract the launch tx called (factory / launchpad) — separate so it runs in parallel."""
+    src, code = await asyncio.gather(ex.source(out["to"]), rpc.code(out["to"]))
+    out["to_name"] = src.get("name") or ("unverified contract" if len(code) > 2 else "EOA")
+    out["to_verified"] = src.get("verified")
 
 
 async def template_info(rpc, ex, info):
@@ -197,7 +203,7 @@ async def hook_info(rpc, ex, lps):
 async def gather_people(rpc, ex, token, info):
     """Launch tx, template and dev profile — independent of the LP analysis, so it runs in parallel with it."""
     dev = info.get("creator")
-    launch = await launch_info(rpc, ex, info)
+    launch = await launch_info(rpc, ex, info, light=True)  # only the tx: the dev is known now, the rest runs below
     if launch.get("from") and launch["from"].lower() != (dev or "").lower():
         dev = launch["from"]  # creator was a factory/launcher contract -> the human is whoever sent the launch tx
     from lib import trace as tracemod, xscan, testnets
@@ -206,23 +212,22 @@ async def gather_people(rpc, ex, token, info):
         return await tracemod.trace(rpc.name, dev, max_hops=hops) if dev else []
     async def test_history():
         return await asyncio.wait_for(testnets.scan(dev, info.get("impl_code") or info.get("code")), 15) if dev else {}
+    async def target():
+        if launch.get("to"):
+            await launch_target(rpc, ex, launch)
+
+    async def launch_time():
+        return int((await rpc.block(launch["block"]))["timestamp"], 16) if launch.get("block") else None
     res = await asyncio.gather(template_info(rpc, ex, info), dev_profile(rpc, ex, dev, token), money_trail(),
-                               xscan.lookup(rpc.name, token), test_history(), farcaster_ids([dev]), return_exceptions=True)
-    tpl, devp, trail, xs, tn, fc = [r if not isinstance(r, Exception) else {} for r in res]
+                               xscan.lookup(rpc.name, token), test_history(), farcaster_ids([dev]), target(), launch_time(), return_exceptions=True)
+    tpl, devp, trail, xs, tn, fc, _, launch_ts = [r if not isinstance(r, Exception) else {} for r in res]
+    launch_ts = launch_ts if isinstance(launch_ts, int) else None
     fc = dict(fc or {})
     wallets = [(h.get("bridge") or {}).get("sender") or h.get("funder") for h in trail or [] if not h.get("end")]
     wallets = [a for a in wallets if a and a.lower() not in fc]
     if wallets:  # funders of the dev: one more batched (cached) call, after the trail is known
         try:
             fc.update(await farcaster_ids(wallets))
-        except Exception:
-            pass
-    launch_ts = None
-    if launch.get("tx"):
-        try:
-            rc = await rpc.receipt(launch["tx"])
-            b = await rpc.block(int(rc["blockNumber"], 16))
-            launch_ts = int(b["timestamp"], 16)
         except Exception:
             pass
     found = []

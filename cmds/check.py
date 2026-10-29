@@ -352,7 +352,13 @@ async def phase_e(rpc, ex, info):
             return {"type": "?", "status": "UNCLEAR", "reasons": ["LP analysis timed out for this pool"], "dex": pair.get("dexId")}
         except Exception as e:
             return {"type": "?", "status": "UNCLEAR", "reasons": [f"lp analysis error: {str(e)[:90]}"], "dex": pair.get("dexId")}
-    return list(await asyncio.gather(*[one(p) for p in info["pairs"][:2]]))
+    pairs = info["pairs"][:2]
+    liq = lambda p: float((p.get("liquidity") or {}).get("usd") or 0)
+    if len(pairs) == 2 and liq(pairs[0]) and liq(pairs[1]) < 0.1 * liq(pairs[0]):
+        # a side pool under 10% of the main one can't move the answer, but a busy one can burn the whole HyperSync
+        # minute (15 requests) and leave the MAIN pool's scan incomplete -> list it, don't scan it
+        info.setdefault("_side_pools", []).append(pairs.pop())
+    return list(await asyncio.gather(*[one(p) for p in pairs]))
 
 
 def rpc_recent_only(info):
@@ -713,6 +719,9 @@ def render(chain, token, info, fns, probes, cands, forkres, mints, lps, ex, t0):
                 L.append(f"   links: {' '.join(soc[:4])}")
     for lp in lps:
         L.append("== " + lpmod.render(lp, ex))
+    for p in info.get("_side_pools") or []:
+        L.append(f"   side pool {p.get('dexId')} {short(p['pairAddress'])} liq ${((p.get('liquidity') or {}).get('usd') or 0):,.0f}"
+                 " (<10% of the main pool) — not analysed")
     if (forkres.get("sell") or {}).get("sizes") or (forkres.get("sell") or {}).get("note"):
         L.extend(sellsim.render(forkres["sell"], dec))
     if (forkres.get("sell") or {}).get("hook"):
@@ -766,6 +775,8 @@ async def main(chain, token, fast=False, as_json=False):
     t0 = time.time()
     budget = float(os.environ.get("DD_BUDGET", "15"))
     DEADLINE[0] = t0 + budget - 1.5 if budget > 0 else 0.0  # margin for interpreter start-up and printing
+    from lib import hypersync
+    hypersync.DEADLINE[0] = DEADLINE[0]
     rpc = RPC(chain)
     ex = explorer.Explorer(rpc.name)
     extra = []

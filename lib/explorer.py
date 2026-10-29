@@ -11,19 +11,25 @@ KEYFILE = os.path.join(ROOT, "keys", "etherscan")
 ETHERSCAN_KEY = open(KEYFILE).read().strip() if os.path.exists(KEYFILE) else ""
 ES_RPS = float(os.environ.get("DD_ETHERSCAN_RPS", "2.8"))  # free tier: 3 calls/sec shared across all chains
 _es_lock = None
-_es_last = [0.0]
+_es_last = []
 FREE_UNSUPPORTED = set()  # chain ids where the free key gets "not supported" (learned at runtime)
 
 
 async def _es_throttle():
+    """At most 3 Etherscan calls in any 1.1 s window (free tier: 3/s). A sliding window instead of fixed 0.36 s
+    spacing: the first calls of a check go out at once instead of queueing behind each other."""
     global _es_lock
     if _es_lock is None:
         _es_lock = asyncio.Lock()
     async with _es_lock:
-        wait = _es_last[0] + 1.0 / ES_RPS - time.time()
-        if wait > 0:
+        n = max(1, int(ES_RPS + 0.5))
+        while len(_es_last) >= n:
+            wait = _es_last[-n] + 1.1 - time.time()
+            if wait <= 0:
+                break
             await asyncio.sleep(wait)
-        _es_last[0] = time.time()
+        _es_last.append(time.time())
+        del _es_last[:-n]
 
 
 UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36", "accept": "application/json"}
@@ -177,6 +183,9 @@ class Explorer:
 
     async def txlist(self, addr, limit=200):
         """Normal transactions of an address, newest first. -> list of dicts with hash,from,to,value,input,timeStamp,isError"""
+        return await cache.once(("txlist", self.chain, addr.lower(), limit), lambda: self._txlist(addr, limit))
+
+    async def _txlist(self, addr, limit):
         r = await self.es("account", "txlist", address=addr, sort="desc", page=1, offset=limit) or \
             await self.rs_api("account", "txlist", address=addr, sort="desc", page=1, offset=limit)
         if r and isinstance(r, list):
@@ -253,11 +262,13 @@ class Explorer:
         c = cache.get(key)
         if c is not None:
             return c
-        out = await self._funded_by(addr)
-        cache.set(key, out, ttl=None if out.get("from") else 600)
+        out = await cache.once(key, lambda: self._funded_by(addr))
+        if not out.get("error"):  # a failed lookup is not "never funded": don't remember it
+            cache.set(key, out, ttl=None if out.get("from") else 600)
         return out
 
     async def _funded_by(self, addr):
+        hs_err = None
         r = await self.es("account", "txlist", address=addr, sort="asc", page=1, offset=20) or \
             await self.rs_api("account", "txlist", address=addr, sort="asc", page=1, offset=20)
         rows = r if (r and isinstance(r, list)) else []
@@ -267,8 +278,8 @@ class Explorer:
                 ff = await hypersync.first_funding(cid, addr)
                 if ff:
                     return ff
-            except Exception:
-                pass
+            except Exception as e:
+                hs_err = str(e)[:80]
         if not rows and self.bs:
             items = await self.bs_pages(f"/api/v2/addresses/{addr}/transactions", max_pages=4)
             rows = [{"from": (i.get("from") or {}).get("hash"), "to": (i.get("to") or {}).get("hash"), "value": i.get("value"),
@@ -280,7 +291,7 @@ class Explorer:
         for t in (ir or []) if isinstance(ir, list) else []:
             if (t.get("to") or "").lower() == addr.lower() and int(t.get("value") or 0) > 0:
                 return {"from": t["from"], "tx": t["hash"], "time": t.get("timeStamp"), "internal": True}
-        return {}
+        return {"error": hs_err} if hs_err else {}
 
     def link(self, kind, x):
         w = self.web

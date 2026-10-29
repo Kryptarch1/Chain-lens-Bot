@@ -28,13 +28,30 @@ ERC721_TRANSFER = topic("Transfer(address,address,uint256)")
 
 
 async def estimate_block(rpc, ts, latest=None):
-    """Rough block number at unix time ts using the recent average block time."""
+    """Block number at unix time ts (minus a 2000-block margin): 16-way search on block timestamps, one batch per
+    round. Average block time is NOT used — it changes over a chain's life (rh, 2026-10) and an overshoot made the
+    v4 Initialize search miss and rescan all history."""
     latest = latest or await rpc.block_number()
-    b1, b0 = await asyncio.gather(rpc.block(latest), rpc.block(max(1, latest - 5000)))
-    t1, t0 = int(b1["timestamp"], 16), int(b0["timestamp"], 16)
-    bt = max(0.05, (t1 - t0) / (latest - max(1, latest - 5000)))
-    est = latest - int((t1 - ts) / bt)
-    return max(0, est - 2000), latest
+    lo, hi = 0, latest  # invariant: block lo is at/before ts (or genesis), block hi after it
+    cache_key = f"blk@{rpc.name}:{int(ts) // 600}"
+    from lib import cache
+    c = cache.get(cache_key)
+    if c is not None:
+        return c, latest
+    for _ in range(5):
+        if hi - lo <= 2000:
+            break
+        pts = sorted({lo + (hi - lo) * i // 16 for i in range(1, 16)})
+        bs = await rpc.batch([("eth_getBlockByNumber", [hex(b), False]) for b in pts])
+        if not all(bs):
+            break  # node can't serve some headers: keep the bracket found so far
+        before = [b for b, x in zip(pts, bs) if int(x["timestamp"], 16) <= ts]
+        lo = before[-1] if before else lo
+        hi = next((b for b in pts if b > lo), hi)
+    est = max(0, lo - 2000)
+    if hi < latest:  # ts is safely in the past: the answer never changes
+        cache.set(cache_key, est, ttl=None)
+    return est, latest
 
 
 async def contract_kind(rpc, ex, a):

@@ -33,7 +33,9 @@ for c in cases:
     fails += bool(problems)
     note = "; ".join(problems) or (f"on-chain state changed? missing {drifted} — re-check this token, update the case" if drifted else "")
     print(f"{status:5} {c['name']:11} {c['chain']:6} {dt:5.1f}s  {note}")
-    if problems and os.environ.get("DD_SHOW"):
-        print(out)
+    if problems:  # keep the full output of a failure for diagnosis (data/ is git-ignored)
+        open(os.path.join(ROOT, "data", f"test_fail_{c['name']}.txt"), "w").write(out + "\n--- stderr ---\n" + p.stderr)
+        if os.environ.get("DD_SHOW"):
+            print(out)
 print(f"\n{'all passed' if not fails else f'{fails} failed'}")
 sys.exit(1 if fails else 0)
