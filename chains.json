@@ -283,7 +283,8 @@
    "pool_manager": "0x188d586ddcf52439676ca21a244753fa19f9ea8e",
    "posm": "0x5b7ec4a94ff9bedb700fb82ab09d5846972f4016"
   },
-  "no_sim": true
+  "no_sim": true,
+  "hs_after_chunks": 20
  },
  "arc": {
   "id": 5042,

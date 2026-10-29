@@ -252,9 +252,10 @@ class RPC:
             from_block = max(from_block, to_block - max_blocks)
         from lib import hypersync
         span = to_block - from_block
-        # Chainstack wins for a few dozen chunks; beyond that HyperSync (one request) is faster. Per-chunk latency
-        # varies a lot by chain (eth 10k blocks ~0.1 s, monad ~0.6 s: 368 chunks took 45 s and timed out the LP scan)
-        use_hs = span > self.logs_range * (40 if self.private else 3)
+        # RPC chunks up to ~1-2 s of work (Chainstack: 40 chunks in 0.25-0.55 s), then HyperSync — which is fast but
+        # allows only 15 requests/min, so cheap scans stay on the RPC. Slow-log chains set hs_after_chunks lower
+        # (monad: 40 chunks 2.7 s; 368 chunks took 45 s and timed out the LP scan).
+        use_hs = span > self.logs_range * (self.cfg.get("hs_after_chunks") or (160 if self.private else 3))
         if hypersync.available(self.cfg.get("id")) and use_hs:
             try:
                 hs_logs, covered = await self._hs_logs(address, topics, from_block, to_block)
@@ -278,15 +279,19 @@ class RPC:
         logs, start = (c["logs"], c["to"] + 1) if c.get("to", -1) >= from_block else ([], from_block)
         covered = start - 1
         if start <= to_block:
-            n = 4 if to_block - start > 8_000_000 else 1  # each part costs 1 of the 15 HyperSync requests/min
+            n = max(1, min(4, (to_block - start) // 5_000_000))  # parallel parts; each costs 1 of 15 requests/min
             step = (to_block - start) // n + 1
             parts = await asyncio.gather(*[hypersync.get_logs(self.cfg["id"], address, topics, s, min(to_block, s + step - 1))
                                            for s in range(start, to_block + 1, step)])
             for i, (lg, cov) in enumerate(parts):
                 logs = logs + lg
                 covered = cov
-                if cov < min(to_block, start + (i + 1) * step - 1):
-                    break  # this part isn't fully indexed yet: later parts would leave a gap, the RPC tail covers it
+                end = min(to_block, start + (i + 1) * step - 1)
+                if cov < end and i < len(parts) - 1:
+                    if end - cov > 2000:
+                        break  # part not indexed yet: stop here, the RPC tail covers the rest
+                    logs = logs + await self._rpc_logs(address, topics, cov + 1, end)  # a few blocks HyperSync left out
+                    covered = end
             logs = [l for l in logs if int(l["blockNumber"], 16) <= covered]
         safe = covered - 64  # keep only reorg-safe blocks in the cache
         if safe > c.get("to", -1) and safe >= from_block:

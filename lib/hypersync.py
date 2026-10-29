@@ -44,13 +44,15 @@ DEADLINE = [0.0]  # absolute time a caller must be done by (set by dd check from
 
 async def _post(url, q):
     """One HyperSync request. On 429 (free plan: 15 requests/min, shared by all chains) wait for the window reset
-    when that still fits the caller's deadline — a short wait beats a partial scan (UNCLEAR LP) — else raise."""
+    when it is <= 8 s away and fits the caller's deadline — a short wait beats a partial scan (UNCLEAR LP) — else raise."""
     for attempt in range(4):
         try:
             async with _sess().post(url, data=json.dumps(q)) as r:
                 if r.status == 429 and attempt < 3:
-                    wait = min(float(r.headers.get("X-RateLimit-Reset") or 1) + 0.3, 61)
-                    if DEADLINE[0] and time.time() + wait > DEADLINE[0] - 1:
+                    wait = float(r.headers.get("X-RateLimit-Reset") or 1) + 0.3
+                    # never longer than 8 s: phases have their own limits (who: 20 s) and a phase that times out
+                    # loses ALL its data, which is worse than one failed lookup
+                    if wait > 8 or (DEADLINE[0] and time.time() + wait > DEADLINE[0] - 1):
                         raise RuntimeError("hypersync rate limited (window resets too late for this check)")
                     await asyncio.sleep(wait)
                     continue
@@ -75,6 +77,9 @@ async def _query_run(chain_id, q, max_pages):
         nb = d.get("next_block")
         if not nb or nb <= q.get("from_block", 0) or (end and nb >= end) or (ah and nb >= ah):
             break  # done, or no progress (asked beyond the indexed tip)
+        if end and end - nb < 200:  # only the newest few blocks left: the RPC tail fetches them, not another request
+            ah = min(ah or nb, nb)
+            break
         q = dict(q, from_block=nb)
     return out, ah
 
