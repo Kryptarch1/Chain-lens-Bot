@@ -157,7 +157,28 @@ async def phase_c(rpc, token, info, fns):
         return out
 
     results = await asyncio.gather(*[probe(f) for f in targets])
+    info["steal"] = await free_transfer_probe(rpc, token, info, cands)
     return results, cands
+
+
+async def free_transfer_probe(rpc, token, info, cands):
+    """transferFrom(pool -> stranger) with NO allowance, as a stranger and as each candidate (eth_call: tx.origin = from).
+    Catches backdoors like 'allowance is only charged when tx.origin != deployer' (ASSETS on hyper): whoever passes can
+    take any holder's tokens, incl. the pool's -> drain the LP although the LP tokens are burned."""
+    pools = [p.get("pairAddress") for p in info.get("pairs") or [] if len(p.get("pairAddress") or "") == 42][:2]
+    if not pools:
+        return None
+    sel = "0x23b872dd"  # transferFrom(address,address,uint256)
+
+    async def ok(victim, who):
+        k, r = await rpc.try_call(token, sel + victim[2:].lower().rjust(64, "0") + STRANGER[2:].lower().rjust(64, "0") + "1".rjust(64, "0"), who)
+        return k and (r in ("0x", None) or (len(r) >= 66 and int(r[:66], 16) == 1))
+    for pool in pools:
+        res = await asyncio.gather(*[ok(pool, w) for w in [STRANGER] + cands])
+        if any(res):
+            return {"fn": "transferFrom without approval", "sel": sel, "args": "address,address,uint256", "steal": True,
+                    "victim": pool, "stranger": res[0], "callers": [] if res[0] else [c for c, k in zip(cands, res[1:]) if k]}
+    return None
 
 
 async def contract_probes(rpc, ex, addr):
@@ -358,6 +379,10 @@ def verdict(info, fns, probes, forkres, mints, lps):
         elif mints.get("method") == "archive":
             extra = f" ({fmt(mints['then'],dec,0)} at launch → {fmt(mints['now'],dec,0)} now)"
         bad.append(f"SUPPLY RAISED AFTER LAUNCH: +{fmt(mints['raised'],dec,0)} tokens{extra}")
+    st = info.get("steal")
+    if st:
+        who = "ANY wallet" if st["stranger"] else ", ".join(short(c) for c in st["callers"])
+        bad.append(f"BACKDOOR: {who} can transferFrom any holder (incl. the pool {short(st['victim'])}) with NO approval → can drain the pool and wallets")
     privileged = [p for p in probes if p.get("callers")]
     open_to_all = {p["sel"] for p in probes if p.get("stranger")}  # any wallet can call it: not an owner power
     risky = [f for f in fns if f["cls"] == "risky" and f["sel"] not in open_to_all]
@@ -488,7 +513,8 @@ def answers(info, fns, probes, forkres, mints, lps):
         key = next((r for r in rs if "can remove" in r or "callable by" in r or "removed" in r), rs[0] if rs else "")
         st = lp.get("status")
         word = {"LOCKED": "YES", "UNLOCKED": "NO", "PULLED": "NO — ALREADY PULLED", "PARTIAL": "PARTLY", "UNCLEAR": "UNCLEAR"}.get(st, st)
-        L.append(f"   LP locked?        {word} — {key}")
+        L.append(f"   LP locked?        {word} — {key}" + (" — BUT the pool's tokens can be taken without the LP (backdoor below)"
+                                                            if info.get("steal") and st in ("LOCKED", "PARTIAL") else ""))
     # 2. malicious functions
     mal = []
     for r in forkres.get("runs", []):
@@ -504,6 +530,11 @@ def answers(info, fns, probes, forkres, mints, lps):
         else:
             for m in tracer_findings(r, info):
                 mal.append(m)
+    p = info.get("steal")
+    if p:
+        who = "ANYONE" if p["stranger"] else ", ".join(short(c) for c in p["callers"])
+        mal.append(f"BACKDOOR: {who} can move ANY holder's tokens without approval — incl. the pool's {short(p['victim'])}"
+                   " → can drain the LP even though LP tokens are burned/locked (simulated transferFrom)")
     tested = {r["fn"] for r in forkres.get("runs", [])}
     for p in probes:
         nm = (p["fn"] or "").lower()
@@ -578,6 +609,8 @@ def answers(info, fns, probes, forkres, mints, lps):
         rug.append("funds taken")
     if mint_yes:
         rug.append("mint & dump")
+    if info.get("steal"):
+        rug.append("pool drain via approval-free transferFrom")
     hk = (forkres.get("_who") or {}).get("hook") or {}
     hs = sell.get("hook") or {}
     hb, hsl = (hs.get("buy") or {}).get("hook_pct"), (hs.get("sell") or {}).get("hook_pct")

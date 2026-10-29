@@ -18,7 +18,7 @@
   "must_contain": [
    "LP PULLED"
   ],
-  "why": "liquidity held by dev-owned EdomaeLpManager, then removed (tx 0x9304c8e3\u2026)"
+  "why": "liquidity held by dev-owned EdomaeLpManager, then removed (tx 0x9304c8e3…)"
  },
  {
   "name": "ONDEX",
@@ -37,7 +37,7 @@
   "token": "0xBc2283d12B1f2f46c1613AE672E95C55b69Ca414",
   "expect": "NOT SAFE",
   "must_contain": [],
-  "why": "clean ERC-20 but 99% of main-pool LP (NFT #3668117) in a plain wallet \u2014 regression: pool start-block estimate overshot on rh and missed the add \u2192 false 'PULLED' (fixed 2026-10-17)",
+  "why": "clean ERC-20 but 99% of main-pool LP (NFT #3668117) in a plain wallet — regression: pool start-block estimate overshot on rh and missed the add → false 'PULLED' (fixed 2026-10-17)",
   "drift": [
    "0x04954601f26af8e68fa4ad0adb56bddff00649fa",
    "can remove any time"
@@ -64,7 +64,7 @@
    "LP PULLED",
    "0x9184a1465a19713ba8d02e310088e39ae2e711f6b8c6e194285e32429482bd86"
   ],
-  "why": "dev pulled the v4 LP (NFT #467523) on 2026-10-16 16:44 UTC, tx 0x9184a146\u2026"
+  "why": "dev pulled the v4 LP (NFT #467523) on 2026-10-16 16:44 UTC, tx 0x9184a146…"
  },
  {
   "name": "SIM-PAD",
@@ -74,7 +74,7 @@
   "must_contain": [
    "liquidity already removed"
   ],
-  "why": "LP already pulled on 2026-10-16 \u2014 rug sim must report it, not try to pull again"
+  "why": "LP already pulled on 2026-10-16 — rug sim must report it, not try to pull again"
  },
  {
   "name": "SIM-MILL",
@@ -133,9 +133,9 @@
   "must_contain": [
    "hook takes 4.00%",
    "real v4 swaps through the PoolManager",
-   "afterSwap \u2192 PoolManager.mint"
+   "afterSwap → PoolManager.mint"
   ],
-  "why": "4% fee hook (afterSwapReturnDelta) \u2014 fee must be MEASURED from real v4 swaps (was missed once)"
+  "why": "4% fee hook (afterSwapReturnDelta) — fee must be MEASURED from real v4 swaps (was missed once)"
  },
  {
   "name": "DEEP-IMDO",
@@ -145,10 +145,10 @@
    "--deep"
   ],
   "must_contain": [
-   "0xaa90\u2026c3f7 (native)",
+   "0xaa90…c3f7 (native)",
    "lowerFee(uint16)"
   ],
-  "why": "UNVERIFIED fee hook: 1.5% to treasury 0xaa90\u2026c3f7 in ETH; lowerFee owned by Safe 2-of-3 \u2014 measured without source",
+  "why": "UNVERIFIED fee hook: 1.5% to treasury 0xaa90…c3f7 in ETH; lowerFee owned by Safe 2-of-3 — measured without source",
   "drift": [
    "hook takes 1.50%"
   ]
@@ -212,10 +212,10 @@
   "token": "0xed3e488d61b9ec88bf4dd80961846d7c97e6e943",
   "args": [],
   "must_contain": [
-   "Serial dev?       YES \u2014 3 earlier coins",
+   "Serial dev?       YES — 3 earlier coins",
    "kazino.click (KAZINO) 0xca416726fe446e576bcfdd948d650f482a3262d7"
   ],
-  "why": "NEXTIME: the dev launched 3 coins in the 3 hours before (through its own launch contract) \u2014 the $300 miss"
+  "why": "NEXTIME: the dev launched 3 coins in the 3 hours before (through its own launch contract) — the $300 miss"
  },
  {
   "name": "FARCASTER-DEV",
@@ -226,6 +226,18 @@
    "Dev identity?     DEV: @benleventhal",
    "verified (signed) by @benleventhal"
   ],
-  "why": "PIZZA: dev wallet 0x1541\u20267d59 is a Farcaster-verified address of @benleventhal (Blackbird founder) \u2014 identity proof the explorer never shows"
+  "why": "PIZZA: dev wallet 0x1541…7d59 is a Farcaster-verified address of @benleventhal (Blackbird founder) — identity proof the explorer never shows"
+ },
+ {
+  "name": "BACKDOOR-TRANSFERFROM",
+  "chain": "hyper",
+  "token": "0xba183698294a30804df16f2aad3106bb3facfa28",
+  "args": [],
+  "must_contain": [
+   "BACKDOOR: 0xb8ff…7357 can move ANY holder's tokens without approval",
+   "Ruggable?         YES — pool drain via approval-free transferFrom",
+   "VERDICT: NOT SAFE"
+  ],
+  "why": "ASSETS: transferFrom only charges the allowance when tx.origin != deployer -> deployer takes the pool's tokens with no approval, syncs, sells -> drains the pool although 100% of LP is burned (fork: 1 sell took 17.5 of 35 HYPE)"
  }
 ]
