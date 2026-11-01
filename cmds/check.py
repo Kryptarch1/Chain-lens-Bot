@@ -640,7 +640,8 @@ def answers(info, fns, probes, forkres, mints, lps):
                  ", ".join(f"{c['symbol']} {c['ca'][:6]}…{c['ca'][-4:]} ({'dead' if c.get('dead') else 'live'})" for c in pc[:4]) +
                  (" …" if len(pc) > 4 else ""))
     elif pc == [] and dev.get("history"):
-        L.append("   Serial dev?       NO — first coin from this wallet")
+        L.append("   Serial dev?       NO — " + (f"no earlier coin in its newest 1000 txs (of {dev.get('nonce')})"
+                                               if dev.get("deploys_floor") else "first coin from this wallet"))
     who = (forkres or {}).get("_who") or {}
     if who.get("farcaster"):
         from lib import farcaster
@@ -771,6 +772,32 @@ async def timed(name, coro, limit, default, notes):
     return r
 
 
+QUOTE_SYMBOLS = ("USDC", "USDT", "DAI", "USDS", "SUSDS", "USDE", "USD0", "FDUSD", "USDB", "USDT0", "USDH", "USDHL", "PYUSD", "FRAX", "WBTC", "CBBTC")
+
+
+async def pool_to_token(rpc, addr):
+    """A pasted POOL address (DexScreener pair links) -> the traded token: the side that isn't the wrapped native or
+    a stable/major quote. None when it isn't a v2/v3-style pool."""
+    try:
+        r = await rpc.batch([("eth_call", [{"to": addr, "data": encode_call(f)}, "latest"]) for f in ("token0()", "token1()")])
+        if not all(x and len(x) == 66 for x in r):
+            return None
+        t0, t1 = (to_addr(x).lower() for x in r)
+        if t0 == t1 or addr.lower() in (t0, t1):
+            return None
+        syms = await rpc.batch([("eth_call", [{"to": t, "data": encode_call("symbol()")}, "latest"]) for t in (t0, t1)])
+        def is_quote(t, sraw):
+            try:
+                sym = decode1("string", sraw).upper()
+            except Exception:
+                sym = ""
+            return t == (rpc.cfg.get("wnative") or "").lower() or sym in QUOTE_SYMBOLS or sym in ("WETH", "WHYPE", "WBNB", "WAVAX", "WS", "WMON")
+        q0, q1 = is_quote(t0, syms[0]), is_quote(t1, syms[1])
+        return t1 if q0 and not q1 else t0 if q1 and not q0 else t0
+    except Exception:
+        return None
+
+
 async def main(chain, token, fast=False, as_json=False):
     t0 = time.time()
     budget = float(os.environ.get("DD_BUDGET", "15"))
@@ -780,7 +807,15 @@ async def main(chain, token, fast=False, as_json=False):
     rpc = RPC(chain)
     ex = explorer.Explorer(rpc.name)
     extra = []
-    info = await timed("reads", phase_a(rpc, ex, rpc.name, token), 45, None, extra)
+    # the pool test runs alongside the reads (no extra latency); only a pasted POOL address restarts them on its token
+    reads = asyncio.create_task(timed("reads", phase_a(rpc, ex, rpc.name, token), 45, None, extra))
+    tok = await pool_to_token(rpc, token)
+    if tok:
+        reads.cancel()
+        print(f"   ({token} is a pool → checking its token {tok})", file=sys.stderr if as_json else sys.stdout)
+        token = tok
+        reads = asyncio.create_task(timed("reads", phase_a(rpc, ex, rpc.name, token), 45, None, extra))
+    info = await reads
     if info is not None:
         info["_recent_only"] = (rpc.cfg.get("logs_recent_only") or rpc.cfg.get("logs_unreliable")) and not getattr(rpc, "private", None)
     if info is None:

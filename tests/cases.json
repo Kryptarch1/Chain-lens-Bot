@@ -235,7 +235,7 @@
   "args": [],
   "must_contain": [
    "BACKDOOR: 0xb8ff…7357 can move ANY holder's tokens without approval",
-   "Ruggable?         YES — pool drain via approval-free transferFrom",
+   "pool drain via approval-free transferFrom",
    "VERDICT: NOT SAFE"
   ],
   "why": "ASSETS: transferFrom only charges the allowance when tx.origin != deployer -> deployer takes the pool's tokens with no approval, syncs, sells -> drains the pool although 100% of LP is burned (fork: 1 sell took 17.5 of 35 HYPE)"

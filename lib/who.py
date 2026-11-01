@@ -78,7 +78,7 @@ async def dev_profile(rpc, ex, dev, token):
     """Funding, age, balance, recent deploys/launches from the explorer (Etherscan/Blockscout)."""
     if not dev:
         return {}
-    bal, nonce, fund, txs = await asyncio.gather(rpc.balance(dev), rpc.nonce(dev), ex.funded_by(dev), ex.txlist(dev, limit=60))
+    bal, nonce, fund, txs = await asyncio.gather(rpc.balance(dev), rpc.nonce(dev), ex.funded_by(dev), ex.txlist(dev, limit=10000))  # full history: age, deploys, past coins
     out = {"address": dev, "balance": bal, "nonce": nonce, "funded_by": fund, "history": bool(txs)}
     if txs:
         ts = [int(t.get("timeStamp") or 0) for t in txs if str(t.get("timeStamp") or "").isdigit()]
@@ -86,6 +86,14 @@ async def dev_profile(rpc, ex, dev, token):
         creates = [t for t in txs if not t.get("to") or t.get("contractAddress")]
         launches = [t for t in txs if re.search(r"launch|create|deploy|mint\(string", (t.get("functionName") or ""), re.I)]
         out["deploys"] = len(creates)
+        if len(txs) >= 1000 and (nonce or 0) > len(txs):  # explorer returned only the newest 1000: count is a floor
+            out["deploys_floor"] = True
+            try:
+                old = await ex.es("account", "txlist", address=dev, sort="asc", page=1, offset=1)
+                if old and str(old[0].get("timeStamp") or "").isdigit():
+                    out["first_seen"] = min(out["first_seen"] or 1e12, int(old[0]["timeStamp"]))
+            except Exception:
+                pass
         out["launch_calls"] = [{"fn": (t.get("functionName") or "")[:40], "to": t.get("to"), "time": int(t.get("timeStamp") or 0), "hash": t.get("hash")} for t in launches[:5]]
         outs = [t for t in txs if (t.get("from") or "").lower() == dev.lower() and int(t.get("value") or 0) > 0 and t.get("to")]
         out["eth_out"] = sum(int(t["value"]) for t in outs)
@@ -113,24 +121,38 @@ async def past_coins(rpc, ex, dev, token, txs):
     from lib.rpc import TRANSFER
     from lib.evm import encode_call, decode1
     from lib import explorer as exmod
-    mine = [t for t in txs if (t.get("from") or "").lower() == dev.lower()][:40]
+    mine = [t for t in txs if (t.get("from") or "").lower() == dev.lower()]
     if not mine:
         return []
+    found, minted = {}, {}  # ca -> launch time; minted-only ca -> block of the dev tx
+    for t in mine:  # direct deploys over the WHOLE history (txlist has contractAddress, no receipt needed)
+        ca = (t.get("contractAddress") or "").lower()
+        if ca and ca != token.lower():
+            found.setdefault(ca, int(t.get("timeStamp") or 0))
+    mine = mine[:40]  # launch-contract mints: receipts of the latest dev txs only
     rcs = await rpc.batch([("eth_getTransactionReceipt", [t["hash"]]) for t in mine])
-    found = {}  # ca -> launch time
     for t, r in zip(mine, rcs):
         if not r:
             continue
         ts = int(t.get("timeStamp") or 0)
-        cas = [r.get("contractAddress")] if r.get("contractAddress") else []
+        if r.get("contractAddress"):
+            ca = r["contractAddress"].lower()
+            if ca != token.lower():
+                found.setdefault(ca, ts)
         for lg in r.get("logs", []):  # ERC-20 mint = Transfer(0x0 -> x) with 3 topics (4 topics = an NFT)
             if lg.get("topics") and lg["topics"][0] == TRANSFER and len(lg["topics"]) == 3 and int(lg["topics"][1], 16) == 0:
-                cas.append(lg["address"])
-        for ca in cas:
-            ca = ca.lower()
-            if ca != token.lower() and ca not in found:
-                found[ca] = ts
-    cas = list(found)[:12]
+                ca = lg["address"].lower()
+                if ca != token.lower() and ca not in found and ca not in minted:
+                    minted[ca] = (int(r["blockNumber"], 16), ts)
+    # a mint inside a dev tx is the dev's coin only if the token was born in that block (launch contract);
+    # existing tokens minted TO the dev (DAI, USDS, vault shares) already had code one block earlier
+    mc = list(minted)[:20]
+    if mc:
+        codes = await rpc.batch([("eth_getCode", [ca, hex(minted[ca][0] - 1)]) for ca in mc])
+        for ca, c in zip(mc, codes):
+            if c is not None and (c or "0x") in ("0x", "0x0"):
+                found.setdefault(ca, minted[ca][1])
+    cas = list(found)[:60]
     if not cas:
         return []
     reads = await rpc.batch([("eth_call", [{"to": ca, "data": encode_call(fn)}, "latest"]) for ca in cas for fn in ("name()", "symbol()")])
@@ -143,7 +165,7 @@ async def past_coins(rpc, ex, dev, token, txs):
         if not sym or sym.upper() in LP_SYMBOLS or "LP" in sym.upper().split("-"):
             continue
         coins.append({"ca": ca, "name": name, "symbol": sym, "launched": found[ca]})
-    coins = coins[:8]
+    coins = coins[:30]  # DexScreener takes 30 addresses per call
     if coins:  # one DexScreener call for all of them: live pools, market cap, liquidity
         d = await exmod._get("https://api.dexscreener.com/latest/dex/tokens/" + ",".join(c["ca"] for c in coins), timeout=6)
         best = {}
@@ -265,7 +287,7 @@ def render(w, ex, sym):
         age = f"{(time.time()-d['first_seen'])/86400:.1f}d old" if d.get("first_seen") else "age ?"
         fb = d.get("funded_by") or {}
         L.append(f"   dev {d['address']}: {d['nonce']} txs, {d['balance']/1e18:.4g} {sym}, {age}" +
-                 (f", {d['deploys']} contract deploys" if d.get("deploys") is not None else "") +
+                 (f", {d['deploys']}{'+' if d.get('deploys_floor') else ''} contract deploys" if d.get("deploys") is not None else "") +
                  (f", sent out {d['eth_out']/1e18:.4g} {sym}" if d.get("eth_out") else ""))
         trail = w.get("trail") or []
         if trail:
@@ -282,10 +304,12 @@ def render(w, ex, sym):
             L.append("   dev history: not available on this chain's explorer key")
         pc = d.get("past_coins")
         if pc:
-            L.append(f"   earlier coins by this dev ({len(pc)}):")
-            for c in pc:
+            L.append(f"   earlier coins by this dev ({len(pc)}{'+' if len(pc) >= 30 else ''}):")
+            for c in pc[:8]:
                 when = time.strftime("%m-%d %H:%M", time.gmtime(c["launched"])) if c.get("launched") else "?"
                 L.append(f"     {c['name']} ({c['symbol']}) {c['ca']} · launched {when} · {c.get('state', '?')}")
+            if len(pc) > 8:
+                L.append(f"     … {len(pc) - 8} more ({sum(1 for c in pc[8:] if c.get('dead'))} dead)")
         elif pc is None and d.get("history"):
             L.append("   earlier coins by this dev: could not be checked (receipts unavailable)")
         for lc in d.get("launch_calls", [])[:3]:

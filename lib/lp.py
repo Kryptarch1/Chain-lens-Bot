@@ -21,6 +21,7 @@ REMOVAL_WORDS = ["remove", "withdraw", "unlock", "rescue", "collect", "decrease"
 
 V2_MINT = topic("Mint(address,uint256,uint256)")
 V3_MINT = topic("Mint(address,address,int24,int24,uint128,uint256,uint256)")
+V3_MINT_RAMSES = topic("Mint(address,address,uint256,int24,int24,uint128,uint256,uint256)")  # Ramses/Shadow v3: + indexed position index
 V3_INC = topic("IncreaseLiquidity(uint256,uint128,uint256,uint256)")
 V4_MODIFY = topic("ModifyLiquidity(bytes32,address,int24,int24,int256,bytes32)")
 V4_INIT = topic("Initialize(bytes32,address,address,uint24,int24,address,uint160,int24)")
@@ -79,10 +80,44 @@ async def contract_kind(rpc, ex, a):
             "owner": owner, "controller": controller, "code": code, "source": src.get("source", "")}
 
 
-async def removal_powers(rpc, info, a, ctx=()):
+# selectors through which a contract could take liquidity out or hand the LP to someone (v2 LP token, v3/v4 NFT, routers, PoolManager)
+LP_EXIT_SELS = {"0c49ccbe": "decreaseLiquidity", "42966c68": "burn(uint256)", "42842e0e": "safeTransferFrom", "b88d4fde": "safeTransferFrom",
+                "23b872dd": "transferFrom", "a9059cbb": "transfer", "a22cb465": "setApprovalForAll", "ac9650d8": "multicall",
+                "dd46508f": "modifyLiquidities", "4afe393c": "modifyLiquiditiesWithoutUnlock", "5a6bcfda": "modifyLiquidity",
+                "48c89491": "unlock", "89afcb44": "burn(address)", "baa2abde": "removeLiquidity", "02751cec": "removeLiquidityETH",
+                "af2979eb": "removeLiquidityETHSupportingFeeOnTransferTokens", "2195995c": "removeLiquidityWithPermit",
+                "ded9382a": "removeLiquidityETHWithPermit", "5b0d5984": "removeLiquidityETHWithPermitSupportingFeeOnTransferTokens"}
+
+
+V2_ONLY_EXITS = {"a9059cbb", "89afcb44", "baa2abde", "02751cec", "af2979eb", "2195995c", "ded9382a", "5b0d5984"}
+
+
+def code_exits(code, rows, nft=False):
+    """Bytecode proof for an LP-holding contract: every way out it COULD use. [] = it has no code path that removes
+    liquidity or moves/approves the LP (no exit selector pushed, no delegatecall/callcode, no generic call-anything fn).
+    approve(x, 0) followed by approve(x, n) is the ERC-20 forceApprove helper (fee swaps) and is listed separately."""
+    b, i, found, approve = bytes.fromhex((code or "0x")[2:]), 0, [], False
+    while i < len(b):
+        op = b[i]
+        if op in (0xF4, 0xF2):
+            found.append("delegatecall" if op == 0xF4 else "callcode")
+        if op == 0x63 and i + 5 <= len(b):
+            sel = b[i + 1:i + 5].hex()
+            if sel in LP_EXIT_SELS and not (nft and sel in V2_ONLY_EXITS):  # an NFT position can't leave via ERC-20 transfer
+                found.append(LP_EXIT_SELS[sel])
+            elif sel == "095ea7b3":
+                approve = True
+        i += 1 + (op - 0x5F if 0x60 <= op <= 0x7F else 0)
+    if any("bytes" in (args or "") and mut not in ("view", "pure") for _, args, mut in rows):
+        found.append("a function taking raw bytes (could call anything)")
+    return sorted(set(found)), approve
+
+
+async def removal_powers(rpc, info, a, ctx=(), nft=False):
     """For a custom LP-owning contract: which non-view functions look like removal, and can the owner call them."""
     rows = sigs.selectors_from_bytecode(info["code"])
     names = await sigs.names_for([s for s, _, _ in rows])
+    info["exits"], info["approve_helper"] = code_exits(info["code"], rows, nft)
     cands = []
     for sel, args, mut in rows:
         if mut in ("view", "pure"):
@@ -171,10 +206,13 @@ async def v3_lp(rpc, ex, pool, from_block, to_block, nfpm_hint=None):
     """Positions = the LARGEST mints (the Mint event carries the liquidity amount), so a busy pool's history is never
     replayed: receipts of the top 40 mint txs in one batch, ownerOf/positions for every tokenId in one batch, then the
     top 8 live positions are inspected in parallel."""
-    logs, pl = await asyncio.gather(rpc.get_logs(pool, [V3_MINT], from_block, to_block), rpc.try_call(pool, encode_call("liquidity()")))
+    logs, pl = await asyncio.gather(rpc.get_logs(pool, [[V3_MINT, V3_MINT_RAMSES]], from_block, to_block), rpc.try_call(pool, encode_call("liquidity()")))
     out = {"type": "v3", "pool": pool, "positions": [], "n_mints": len(logs),
            "pool_liquidity": int(pl[1], 16) if pl[0] and pl[1] and pl[1] != "0x" else None}
-    logs = sorted(logs, key=lambda l: -int(l["data"][2:][64:128], 16))  # by minted liquidity, biggest first
+    def minted(l):  # liquidity word: standard (sender, amount, ..) vs Ramses (sender, tickUpper, amount, ..)
+        w = 2 if l["topics"][0] == V3_MINT_RAMSES else 1
+        return int(l["data"][2:][64 * w:64 * (w + 1)] or "0", 16)
+    logs = sorted(logs, key=lambda l: -minted(l))  # by minted liquidity, biggest first
     nfpms = {}
     for l in logs:
         nfpms.setdefault(topic_addr(l["topics"][1]), []).append(l["transactionHash"])
@@ -196,7 +234,10 @@ async def v3_lp(rpc, ex, pool, from_block, to_block, nfpm_hint=None):
             liq = None
             if pos and len(pos) > 2:
                 try:
-                    liq = decode_out("uint96,address,address,address,uint24,int24,int24,uint128,uint256,uint256,uint128,uint128", pos)[7]
+                    if len(pos) == 2 + 64 * 10:  # Ramses-style NFPM: (token0, token1, tickSpacing, tickLower, tickUpper, liquidity, ..)
+                        liq = int(pos[2 + 64 * 5:2 + 64 * 6], 16)
+                    else:
+                        liq = decode_out("uint96,address,address,address,uint24,int24,int24,uint128,uint256,uint256,uint128,uint128", pos)[7]
                 except Exception:
                     pass
             holder = to_addr(o) if o and len(o) >= 66 else None
@@ -207,7 +248,7 @@ async def v3_lp(rpc, ex, pool, from_block, to_block, nfpm_hint=None):
     async def inspect(p):
         p["info"] = await contract_kind(rpc, ex, p["owner"])
         if p["info"]["kind"] == "contract":
-            p["info"]["removal"] = await removal_powers(rpc, p["info"], p["owner"])
+            p["info"]["removal"] = await removal_powers(rpc, p["info"], p["owner"], nft=True)
     await asyncio.gather(*[inspect(p) for p in live])
     return out
 
@@ -334,7 +375,7 @@ async def v4_lp(rpc, ex, cfg, pool_id, from_block, to_block, seed_txs=(), init_h
         if p["owner"].startswith("0x"):
             p["info"] = await contract_kind(rpc, ex, p["owner"])
             if p["info"]["kind"] == "contract":
-                p["info"]["removal"] = await removal_powers(rpc, p["info"], p["owner"], (out.get("key") or ())[:2])
+                p["info"]["removal"] = await removal_powers(rpc, p["info"], p["owner"], (out.get("key") or ())[:2], nft=True)
         return p
     out["positions"] = list(await asyncio.gather(*[one(k, liq) for k, liq in live]))
     out["positions"].sort(key=lambda x: -x["liq"])
@@ -406,6 +447,11 @@ def judge(lp):
             elif not listed and cleared:
                 locked += share
                 reasons.append(f"{share:.0f}% in {info['name']} {o} — no removal path: {', '.join(r['fn'] for r in cleared[:3])} run but remove no liquidity (traced)")
+            elif listed and info.get("exits") == [] and not info.get("proxy"):
+                locked += share
+                reasons.append(f"{share:.0f}% in {info['name']} {o} — no removal path in its code: it never calls decreaseLiquidity/burn/"
+                               f"transfer/setApprovalForAll on the LP and has no delegatecall (bytecode proof)" +
+                               (" — only an ERC-20 approve helper (fee swaps)" if info.get("approve_helper") else ""))
             elif listed:
                 reasons.append(f"{share:.0f}% in {info['name']} {o} — has removal-like fns ({', '.join(r['fn'] for r in listed[:3])}) needing args; owner {info.get('controller') or info.get('owner')}" +
                                (f"; {', '.join(r['fn'] for r in cleared[:2])} traced: remove no liquidity" if cleared else ""))

@@ -198,7 +198,7 @@ class Explorer:
             except Exception:
                 pass
         if self.bs:
-            items = await self.bs_pages(f"/api/v2/addresses/{addr}/transactions", max_pages=max(1, limit // 50))
+            items = await self.bs_pages(f"/api/v2/addresses/{addr}/transactions", max_pages=min(10, max(1, limit // 50)))
             return [{"hash": i.get("hash"), "from": (i.get("from") or {}).get("hash"), "to": (i.get("to") or {}).get("hash"),
                      "value": i.get("value"), "input": i.get("raw_input", ""), "timeStamp": i.get("timestamp"),
                      "isError": "0" if i.get("status") == "ok" else "1", "functionName": (i.get("method") or ""),
