@@ -287,6 +287,46 @@ async def v4_pool_liquidity(rpc, pm, pool_id):
     return int(r[-32:], 16) & ((1 << 128) - 1) if ok and r and len(r) >= 66 else None
 
 
+V4_BEFORE_REMOVE = 1 << 9  # hook permission bit in the hook address
+
+
+async def hook_blocks_removal(rpc, pm, key, sender, tl, tu, liq, salt):
+    """Simulate the pool's hook gate `beforeRemoveLiquidity` exactly as the PoolManager would call it for this position
+    (msg.sender = PoolManager, sender = the position's owner), now and 10 years from now. -> revert reason if the hook
+    refuses removal at both times and can't be upgraded (no DELEGATECALL/CALLCODE), else None."""
+    from eth_abi import encode
+    hook = key[4] if key and len(key) > 4 else None
+    if not hook or not int(hook, 16) & V4_BEFORE_REMOVE:
+        return None
+    code = bytes.fromhex((await rpc.code(hook))[2:])
+    i = 0
+    while i < len(code):
+        op = code[i]
+        if op in (0xF4, 0xF2):
+            return None  # upgradeable / delegating hook: today's rule can change
+        i += 1 + (op - 0x5F if 0x60 <= op <= 0x7F else 0)
+    data = "0x" + (_keccak(text="beforeRemoveLiquidity(address,(address,address,uint24,int24,address),(int24,int24,int256,bytes32),bytes)")[:4] +
+                   encode(["address", "(address,address,uint24,int24,address)", "(int24,int24,int256,bytes32)", "bytes"],
+                          [sender, tuple(key[:5]), (tl, tu, -liq, bytes.fromhex(salt[-64:].rjust(64, "0"))), b""])).hex()
+    tx = {"from": pm, "to": hook, "data": data}
+    out = []
+    for extra in ([], [{}, {"time": hex(int(time.time()) + 10 * 365 * 86400)}]):
+        try:
+            await rpc.call("eth_call", [tx, "latest"] + extra)
+            return None  # the hook lets this removal through
+        except RPCError as e:
+            m = str(e)
+            if "revert" not in m.lower():
+                if extra:
+                    break  # RPC can't override the clock: judge on today's result
+                return None
+            out.append(m)
+    err = out[0]
+    if "0x8f4e75b2" in err:
+        return "LiquidityLocked()"
+    return err[:80]
+
+
 async def v4_lp(rpc, ex, cfg, pool_id, from_block, to_block, seed_txs=(), init_hint=None):
     pm = cfg["v4"]["pool_manager"]
     posm = cfg["v4"].get("posm")
@@ -372,6 +412,8 @@ async def v4_lp(rpc, ex, cfg, pool_id, from_block, to_block, seed_txs=(), init_h
             p["owner"] = to_addr(o) if ok and o and len(o) >= 66 else "BURNED (token does not exist)"
         else:
             p["owner"] = sender
+        if out.get("key"):
+            p["hook_lock"] = await hook_blocks_removal(rpc, pm, out["key"], sender, tl, tu, liq, salt)
         if p["owner"].startswith("0x"):
             p["info"] = await contract_kind(rpc, ex, p["owner"])
             if p["info"]["kind"] == "contract":
@@ -430,6 +472,9 @@ def judge(lp):
         share = 100 * (p.get("liq") or 0) / total
         o = p.get("owner") or ""
         info = p.get("info", {})
+        if p.get("hook_lock"):
+            locked += share; reasons.append(f"{share:.0f}% locked by the pool's hook — it reverts every removal of this position ({p['hook_lock']}), "
+                                            f"simulated as the holder now and 10 years ahead; the hook has no delegatecall so this can't change"); continue
         if o.startswith("BURNED") or o.lower() in (ZERO, DEAD):
             locked += share; reasons.append(f"{share:.0f}% burned (position NFT sent to burn address)" if not o.startswith("BURNED") else f"{share:.0f}% burned (NFT destroyed)"); continue
         if info.get("kind") == "eoa":

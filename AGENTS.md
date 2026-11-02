@@ -130,3 +130,11 @@ Stop on drainer signs. Keys live only in RAM (/dev/shm); never print, log or sto
 
 ## GitHub
 Repo: Kryptarch1/Chain-lens-Bot (private). After ANY change here: `git add -A` (includes deletions), commit, `git push origin main` — no need to ask. keys/, kit/keys/, data/, caches, .venv, node_modules are git-ignored and must never be pushed; scan new files for secrets first.
+
+- ELYSIUM (Kinetiq's HyperEVM L2, chain 99901, gas HYPE): public RPC https://rpc.elyscan.live (community node, supports eth_simulateV1
+  and wide getLogs; no debug_*), explorer https://elyscan.live (no API). Boxa is the main launchpad: no bonding curve, coins launch
+  straight into Boxa's OWN Uniswap-v4 copy (PoolManager 0x06c6…b2c4, hook 0xbcc1…6acc, launcher 0x00d4…d205; 1% hook fee, 30% to
+  treasury, rest holder rewards/buybacks). Nothing "graduates".
+- V4 HOOK LP LOCK (lib/lp.py hook_blocks_removal): for every v4 position, if the hook has the beforeRemoveLiquidity permission, it is
+  simulated exactly as the PoolManager would call it (from = PoolManager, sender = the position owner), now and 10 years ahead. Reverts
+  at both times + no DELEGATECALL/CALLCODE in the hook -> that share counts as LOCKED ("locked by the pool's hook").

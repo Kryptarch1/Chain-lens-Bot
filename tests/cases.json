@@ -249,5 +249,16 @@
    "hook tax getter taxBps=9999"
   ],
   "why": "v4 hook taxes 99.99% of sells (taxBps getter) while plain transfer test shows 0%; dev can toggle it"
+ },
+ {
+  "name": "HOOKLOCK",
+  "chain": "elysium",
+  "token": "0x0ebd99f3defb6b7bbbfecdb231bbec9506e677bd",
+  "expect": "CAUTION",
+  "must_contain": [
+   "locked by the pool's hook",
+   "LiquidityLocked()"
+  ],
+  "why": "Boxa (Elysium) v4 launch: LP held by the launcher, hook reverts every removal -> LOCKED via simulated beforeRemoveLiquidity"
  }
 ]

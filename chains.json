@@ -308,5 +308,20 @@
    "posm": "0x6049c9a0e26405c0985f9e3685c87d0ae917f82b"
   },
   "wnative": "0x3600000000000000000000000000000000000000"
+ },
+ "elysium": {
+  "id": 99901,
+  "symbol": "HYPE",
+  "rpc": [
+   "https://rpc.elyscan.live"
+  ],
+  "logs_range": 100000,
+  "rps": 5,
+  "explorer": {
+   "web": "https://elyscan.live"
+  },
+  "v4": {
+   "pool_manager": "0x06c63714fbf1f5753017123e2fcfdede4540b2c4"
+  }
  }
 }
