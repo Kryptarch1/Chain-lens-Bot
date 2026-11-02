@@ -25,7 +25,7 @@ def values(args, who, mode="probe", fn_name=""):
                 out.append(BUYER if any(w in low for w in TARGET_WORDS) else (who if any(w in low for w in SELF_WORDS) else BUYER))
             else:
                 out.append(who)
-        elif t.startswith(("uint", "int")):
+        elif t.startswith(("uint", "int")) and not t.endswith("]"):  # uint256[] is an array: handled below
             signed = t.startswith("int")
             bits = int(t[3 if signed else 4:] or 256)
             top = 2 ** (bits - 1) - 1 if signed else 2 ** bits - 1
@@ -91,6 +91,12 @@ def traced_sets(args, addrs, stranger):
         for t in ts:
             if t == "address":
                 vals.append(ad)
+            elif t == "address[]":
+                vals.append([ad])
+            elif t.endswith("[]") and t.startswith(("uint", "int")):
+                vals.append([num])
+            elif t.endswith("]"):
+                vals.append([])
             elif t.startswith(("uint", "int")):
                 signed = t.startswith("int")
                 bits = int(t[3 if signed else 4:] or 256)

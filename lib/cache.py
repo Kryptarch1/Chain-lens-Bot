@@ -91,5 +91,8 @@ async def once(k, make):
     fut = _inflight.get(key)
     if fut is None:
         fut = _inflight[key] = asyncio.ensure_future(make())
-        fut.add_done_callback(lambda _f: _inflight.pop(key, None))
+        def done(f):
+            _inflight.pop(key, None)
+            f.cancelled() or f.exception()  # mark retrieved: a waiter cut off by the deadline must not leave a stray traceback
+        fut.add_done_callback(done)
     return await asyncio.shield(fut)

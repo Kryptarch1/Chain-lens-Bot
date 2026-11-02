@@ -239,5 +239,15 @@
    "VERDICT: NOT SAFE"
   ],
   "why": "ASSETS: transferFrom only charges the allowance when tx.origin != deployer -> deployer takes the pool's tokens with no approval, syncs, sells -> drains the pool although 100% of LP is burned (fork: 1 sell took 17.5 of 35 HYPE)"
+ },
+ {
+  "name": "HOOKTAX",
+  "chain": "base",
+  "token": "0xb200000000000000000000e4d30d59a6dbd73849",
+  "expect": "NOT SAFE",
+  "must_contain": [
+   "hook tax getter taxBps=9999"
+  ],
+  "why": "v4 hook taxes 99.99% of sells (taxBps getter) while plain transfer test shows 0%; dev can toggle it"
  }
 ]

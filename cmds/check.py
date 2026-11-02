@@ -365,8 +365,20 @@ def rpc_recent_only(info):
     return info.get("_recent_only")
 
 
+def hook_getter_tax(hk):
+    """(name, pct, raw) of the highest live basis-point tax/fee getter on the v4 hook, e.g. taxBps=9999 → 99.99%."""
+    rows = [(k, v / 100, v) for k, v in (hk.get("fee_reads") or {}).items()
+            if "bps" in k.lower() and any(w in k.lower() for w in ("tax", "fee")) and not k.isupper() and v <= 10_000]
+    return max(rows, key=lambda r: r[1], default=None)
+
+
 def verdict(info, fns, probes, forkres, mints, lps):
     bad, warn, notes = [], [], []
+    hk = (forkres.get("_who") or {}).get("hook") or {}
+    hs = (forkres.get("sell") or {}).get("hook") or {}
+    gt = hook_getter_tax(hk) if not (hs.get("buy") or hs.get("sell")) else None
+    if gt and gt[1] >= 50:
+        bad.append(f"v4 hook tax getter {gt[0]}={gt[2]} → {gt[1]:.2f}% taken (quick read; deep check measures it with real swaps)")
     dec = info["decimals"] or 18
     for r in forkres.get("runs", []):
         if r["ok"] and r["supply_after"] and r["supply_before"] and r["supply_after"] > r["supply_before"]:
@@ -629,6 +641,14 @@ def answers(info, fns, probes, forkres, mints, lps):
         hp += " + hook fee getters: " + ", ".join(f"{k}={v}" for k, v in list(hk["fee_reads"].items())[:3])
     elif hk.get("swap_fee_pct"):
         hp += f" + pool hook fee {hk['swap_fee_pct']:g}% per swap"
+    stx = max([x.get("sell_tax") or 0 for r in sell.get("sizes", []) for x in r.get("sells", [])] + [hsl or 0, (t or {}).get("sell_tax") or 0])
+    gt = hook_getter_tax(hk) if hb is None and hsl is None else None
+    if stx >= 90 and not hp.startswith("YES"):
+        hp = f"YES — sells lose {stx:.2f}% (measured) · " + hp.replace("NO — sold fine", "sells go through")
+        rug.append(f"{stx:.0f}% sell tax")
+    elif gt and gt[1] >= 50 and not hp.startswith("YES"):
+        hp = f"LIKELY — hook getter {gt[0]}={gt[2]} ({gt[1]:.2f}%) · {hp.replace("NO (", "plain transfer test (", 1)} · deep check measures it with real swaps"
+        rug.append(f"hook tax {gt[1]:.0f}%")
     L.append(f"   Honeypot?         {hp}")
     L.append(f"   Mintable?         {mint_txt}")
     L.append(f"   Ruggable?         {'YES — ' + ', '.join(rug) if rug else 'no rug path found'}")
