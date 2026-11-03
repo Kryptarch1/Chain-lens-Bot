@@ -322,6 +322,6 @@
   },
   "v4": {
    "pool_manager": "0x06c63714fbf1f5753017123e2fcfdede4540b2c4"
-  }
+  , "any_manager": true}
  }
 }

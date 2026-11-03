@@ -138,3 +138,7 @@ Repo: Kryptarch1/Chain-lens-Bot (private). After ANY change here: `git add -A` (
 - V4 HOOK LP LOCK (lib/lp.py hook_blocks_removal): for every v4 position, if the hook has the beforeRemoveLiquidity permission, it is
   simulated exactly as the PoolManager would call it (from = PoolManager, sender = the position owner), now and 10 years ahead. Reverts
   at both times + no DELEGATECALL/CALLCODE in the hook -> that share counts as LOCKED ("locked by the pool's hook").
+- MANY v4 POOLMANAGERS (chains.json `"v4": {"any_manager": true}`, Elysium: 12 copies, one per DEX/launchpad): v4 pools are
+  accepted from ANY PoolManager; each pool carries its own `pm` (lib/discover v4_manager_of finds it for DexScreener pool ids) and
+  the main pool's PoolManager becomes rpc.cfg["v4"] for the rest of the check. No posm configured -> a position sender that
+  answers ownerOf(salt) is treated as the position-NFT contract (p["posm"]).

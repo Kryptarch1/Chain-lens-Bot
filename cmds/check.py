@@ -101,6 +101,15 @@ async def phase_a(rpc, ex, chain, token):
         info["pools_src"] = "on-chain scan"
     for p in info["pairs"]:
         p.setdefault("seed_txs", [info["created_tx"]] if info.get("created_tx") else [])
+    if (rpc.cfg.get("v4") or {}).get("any_manager"):
+        # many PoolManagers on this chain: each v4 pool carries its own, and the main pool's becomes the chain's
+        # v4 config for the rest of this check (LP, sell tests, hook sims all read rpc.cfg["v4"])
+        todo = [p for p in info["pairs"][:2] if len(p.get("pairAddress") or "") == 66 and not p.get("pm")]
+        for p, pm in zip(todo, await asyncio.gather(*[discover.v4_manager_of(rpc, p["pairAddress"]) for p in todo])):
+            p["pm"] = pm
+        main = info["pairs"][0] if info["pairs"] else {}
+        if main.get("pm"):
+            rpc.cfg = {**rpc.cfg, "v4": {"pool_manager": main["pm"], "any_manager": True}}
     if info["beacon"]:
         ok, r = await rpc.try_call(info["beacon"], encode_call("implementation()"))
         if ok and r and len(r) >= 66:

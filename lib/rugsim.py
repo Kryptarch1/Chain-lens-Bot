@@ -126,7 +126,7 @@ async def sim_v3(fork, rpc, lp):
 
 
 async def sim_v4_posm(fork, rpc, cfg, lp, p, meta):
-    posm = cfg["v4"]["posm"]
+    posm = p.get("posm") or cfg["v4"]["posm"]
     owner, tid = p["owner"], p["nft"]
     c0, c1 = lp["key"][0], lp["key"][1]
     actions = bytes([0x03, 0x11])  # BURN_POSITION, TAKE_PAIR

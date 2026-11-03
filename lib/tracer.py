@@ -90,6 +90,9 @@ def summarize(call_tree, diff=None):
                     out.setdefault("liq_removed", []).append({"kind": "v4", "pool": tp[1], "by": to_addr(tp[2]), "delta": d - (1 << 256)})
             elif t0 in (V3_DECREASE, V2_BURN):
                 out.setdefault("liq_removed", []).append({"kind": "v3" if t0 == V3_DECREASE else "v2", "at": (lg.get("address") or "").lower()})
+            if len(tp) == 4 and tp[0].lower() == TRANSFER:  # ERC-721 transfer (tokenId indexed): e.g. an LP position NFT leaving a locker
+                out.setdefault("nft_out", []).append({"nft": (lg.get("address") or "").lower(), "from": to_addr(tp[1]), "to": to_addr(tp[2]),
+                                                      "id": to_int(tp[3])})
             if len(tp) == 3 and tp[0].lower() == TRANSFER:
                 out["transfers"].append({"token": (lg.get("address") or "").lower(), "from": to_addr(tp[1]), "to": to_addr(tp[2]),
                                          "amount": to_int(lg.get("data") or "0x0")})

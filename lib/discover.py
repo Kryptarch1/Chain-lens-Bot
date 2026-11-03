@@ -68,6 +68,23 @@ async def creation_block(rpc, ex, addr, hint_ts=None):
         return None, None
 
 
+def v4_manager_ok(cfg, addr):
+    """Is `addr` a PoolManager we accept? The configured one, or any emitter on chains with many v4 copies
+    (`"any_manager": true`, e.g. Elysium: every DEX/launchpad runs its own PoolManager)."""
+    v4 = cfg.get("v4") or {}
+    return bool(v4) and (v4.get("any_manager") or not v4.get("pool_manager") or addr.lower() == v4["pool_manager"].lower())
+
+
+async def v4_manager_of(rpc, pool_id):
+    """The PoolManager that initialized `pool_id` (one log query, no address filter) -> address or None."""
+    try:
+        logs = await rpc.get_logs(None, [V4_INIT, pool_id], 0, await rpc.block_number())
+    except RPCError:
+        return None
+    logs = [l for l in logs if v4_manager_ok(rpc.cfg, l["address"])]
+    return logs[0]["address"].lower() if logs else None
+
+
 async def find_pools(rpc, token, from_block, span=None):
     """All pools whose creation event names `token` as token0/token1, on any factory.
     -> list of dicts shaped like DexScreener pairs (pairAddress, dexId, labels, created_block, factory, quote)."""
@@ -81,22 +98,22 @@ async def find_pools(rpc, token, from_block, span=None):
         ("v3", [ALGEBRA_POOL, t]), ("v3", [ALGEBRA_POOL, None, t]),
         ("v4", [V4_INIT, None, t]), ("v4", [V4_INIT, None, None, t]),
     ]
-    pm_addr = (rpc.cfg.get("v4") or {}).get("pool_manager")
+    v4 = rpc.cfg.get("v4") or {}
+    pm_addr = None if v4.get("any_manager") else v4.get("pool_manager")
     res = await asyncio.gather(*[rpc.get_logs(pm_addr if (kind == "v4" and pm_addr) else None, q, from_block, to_block) for kind, q in queries], return_exceptions=True)
     pools, seen = [], set()
-    pm = (rpc.cfg.get("v4") or {}).get("pool_manager", "").lower()
     for (kind, q), logs in zip(queries, res):
         if isinstance(logs, Exception):
             continue
         for l in logs:
             tps = l["topics"]
             if kind == "v4":
-                if pm and l["address"].lower() != pm:
+                if not v4_manager_ok(rpc.cfg, l["address"]):
                     continue
                 pid = tps[1]
                 c0, c1 = topic_addr(tps[2]), topic_addr(tps[3])
                 hook = to_addr(l["data"][2:][128:192])
-                p = {"pairAddress": pid, "labels": ["v4"], "dexId": "uniswap-v4", "hook": hook}
+                p = {"pairAddress": pid, "labels": ["v4"], "dexId": "uniswap-v4", "hook": hook, "pm": l["address"].lower()}
             else:
                 c0, c1 = topic_addr(tps[1]), topic_addr(tps[2])
                 d = l["data"][2:]
@@ -163,7 +180,6 @@ async def supply_change(rpc, token, block):
 async def pools_from_receipts(rpc, txs, token):
     """Pools created in specific txs (e.g. the token's creation tx) — no log search needed."""
     t = token.lower()
-    pm = (rpc.cfg.get("v4") or {}).get("pool_manager", "").lower()
     pools, seen = [], set()
     for h in [x for x in txs if x]:
         r = await rpc.receipt(h)
@@ -176,10 +192,10 @@ async def pools_from_receipts(rpc, txs, token):
                 continue
             sig = tps[0]
             p = None
-            if sig == V4_INIT and len(tps) >= 4 and (not pm or l["address"].lower() == pm):
+            if sig == V4_INIT and len(tps) >= 4 and v4_manager_ok(rpc.cfg, l["address"]):
                 c0, c1 = topic_addr(tps[2]), topic_addr(tps[3])
                 if t in (c0.lower(), c1.lower()):
-                    p = {"pairAddress": tps[1], "labels": ["v4"], "dexId": "uniswap-v4", "hook": to_addr(l["data"][2:][128:192])}
+                    p = {"pairAddress": tps[1], "labels": ["v4"], "dexId": "uniswap-v4", "hook": to_addr(l["data"][2:][128:192]), "pm": l["address"].lower()}
             elif sig in (PAIR_CREATED, POOL_CREATED, ALGEBRA_POOL) and len(tps) >= 3:
                 c0, c1 = topic_addr(tps[1]), topic_addr(tps[2])
                 if t in (c0.lower(), c1.lower()):

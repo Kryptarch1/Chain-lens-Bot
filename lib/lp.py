@@ -150,7 +150,9 @@ async def removal_powers(rpc, info, a, ctx=(), nft=False):
                     runs.append((label, nonzero, tracer.trace_call(rpc, sender, a, sel + data, diff=False)))
             res = await asyncio.gather(*[r for _, _, r in runs], return_exceptions=True)
             ran = [(label, nz, tr) for (label, nz, _), tr in zip(runs, res) if isinstance(tr, dict) and not tr.get("error")]
-            pulls = sorted({label for label, _, tr in ran if tr.get("liq_removed")})
+            # handing the LP position NFT out of the holder contract is as good as pulling it (the receiver can then remove it)
+            pulls = sorted({label for label, _, tr in ran if tr.get("liq_removed") or
+                            (nft and any(t["from"].lower() == a.lower() for t in tr.get("nft_out", [])))})
             if pulls:
                 traced = "pulls liquidity"
                 callable_by = sorted(set(callable_by) | set(pulls))
@@ -405,7 +407,14 @@ async def v4_lp(rpc, ex, cfg, pool_id, from_block, to_block, seed_txs=(), init_h
     async def one(k, liq):
         sender, tl, tu, salt = k
         p = {"sender": sender, "liq": liq, "ticks": (tl, tu), "salt": salt}
-        if posm and sender.lower() == posm.lower():
+        nft_owner = None
+        if not posm and int(salt, 16):
+            # no position manager configured (chains with many v4 copies): a sender that answers ownerOf(salt) is one
+            ok, o = await rpc.try_call(sender, encode_call("ownerOf(uint256)", [int(salt, 16)]))
+            nft_owner = to_addr(o) if ok and o and len(o) >= 66 else None
+        if nft_owner:
+            p["nft"], p["owner"], p["posm"] = int(salt, 16), nft_owner, sender
+        elif posm and sender.lower() == posm.lower():
             tid = int(salt, 16)
             ok, o = await rpc.try_call(posm, encode_call("ownerOf(uint256)", [tid]))
             p["nft"] = tid
@@ -532,6 +541,8 @@ async def analyze_pair(rpc, ex, cfg, pair, creator=None, created_ts=None):
     if "v4" in labels or len(pid) == 66:
         if "v4" not in cfg:
             return {"type": "v4", "status": "UNCLEAR", "reasons": ["no v4 PoolManager configured for this chain"]}
+        if pair.get("pm") and cfg["v4"].get("any_manager"):
+            cfg = {**cfg, "v4": {**cfg["v4"], "pool_manager": pair["pm"]}}
         lp = await v4_lp(rpc, ex, cfg, pid, from_block, latest, pair.get("seed_txs") or (), init_hint)
     elif "v3" in labels or any(x in dex for x in ("v3", "algebra", "aerodrome-slipstream")):
         lp = await v3_lp(rpc, ex, pid, from_block, latest)
