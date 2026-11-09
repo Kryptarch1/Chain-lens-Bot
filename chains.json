@@ -313,15 +313,21 @@
   "id": 99901,
   "symbol": "HYPE",
   "rpc": [
+   "https://rpc.elysium.kinetiq.xyz",
    "https://rpc.elyscan.live"
   ],
   "logs_range": 100000,
-  "rps": 5,
+  "rps": 40,
   "explorer": {
-   "web": "https://elyscan.live"
+   "routescan": "https://elysium.kinetiq.xyz/api",
+   "web": "https://elysium.kinetiq.xyz/explorer"
   },
   "v4": {
-   "pool_manager": "0x06c63714fbf1f5753017123e2fcfdede4540b2c4"
-  , "any_manager": true}
+   "pool_manager": "0x06c63714fbf1f5753017123e2fcfdede4540b2c4",
+   "any_manager": true
+  },
+  "headers": {
+   "User-Agent": "Mozilla/5.0"
+  }
  }
 }

@@ -18,7 +18,7 @@ TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 V4_MODIFY = "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec"   # ModifyLiquidity(bytes32,address,int24,int24,int256,bytes32)
 V3_DECREASE = "0x26f6a048ee9138f2c0ce266f322cb99228e8d619ae2bff30c67f8dcf9d2377b4"  # DecreaseLiquidity(uint256,uint128,uint256,uint256)
 V2_BURN = "0xdccd412f0b1252819cb1fd330b93224ca42612892bb3f4f789976e6d81936496"      # Burn(address,uint256,uint256,address)
-_UNSUPPORTED = ("does not exist", "not available", "not supported", "method not found", "unsupported", "not allowed")
+_UNSUPPORTED = ("api key required", "does not exist", "not available", "not supported", "method not found", "unsupported", "not allowed")
 _CALL_CFG = {"tracer": "callTracer", "tracerConfig": {"withLog": True}}
 _DIFF_CFG = {"tracer": "prestateTracer", "tracerConfig": {"diffMode": True}}
 
@@ -48,6 +48,46 @@ async def trace_call(rpc, frm, to, data, value=0, overrides=None, block="latest"
     if cr is None:
         return None
     return summarize(cr, dr)
+
+
+async def trace_or_sim(rpc, frm, to, data, value=0):
+    """debug_traceCall when the node has it, else eth_simulateV1 logs (no fork): enough to see liquidity leave
+    (ModifyLiquidity < 0, DecreaseLiquidity, v2 Burn, an LP NFT transfer). -> {'liq_removed','nft_out','error'} or None."""
+    if not getattr(rpc, "no_debug", False):
+        tr = await trace_call(rpc, frm, to, data, value=value, diff=False)
+        if tr is not None:
+            return tr
+    from lib import quicksim
+    try:
+        r = await quicksim.simulate_blocks(rpc, [{"calls": [{"from": frm, "to": to, "data": data, "gas": 3_000_000, "value": value}],
+                                                     "stateOverrides": {frm: {"balance": hex(10 ** 22)}}}])
+    except Exception:
+        return None
+    if not r:
+        return None
+    c = r[-1][-1]
+    out = {"error": None if c["ok"] else (c.get("err") or "reverted"), "transfers": [], "calls": [], "native": [], "storage": {},
+           "balances": {}, "ops": set()}
+    scan_logs(c.get("logs") or [], out)
+    return out
+
+
+def scan_logs(logs, out):
+    for lg in logs:
+        tp = lg.get("topics") or []
+        t0 = tp[0].lower() if tp else ""
+        if t0 == V4_MODIFY and len(lg.get("data") or "") >= 2 + 64 * 3:
+            d = int(lg["data"][2 + 128:2 + 192], 16)
+            if d >> 255:
+                out.setdefault("liq_removed", []).append({"kind": "v4", "pool": tp[1], "by": to_addr(tp[2]), "delta": d - (1 << 256)})
+        elif t0 in (V3_DECREASE, V2_BURN):
+            out.setdefault("liq_removed", []).append({"kind": "v3" if t0 == V3_DECREASE else "v2", "at": (lg.get("address") or "").lower()})
+        if len(tp) == 4 and t0 == TRANSFER:
+            out.setdefault("nft_out", []).append({"nft": (lg.get("address") or "").lower(), "from": to_addr(tp[1]), "to": to_addr(tp[2]),
+                                                  "id": to_int(tp[3])})
+        if len(tp) == 3 and t0 == TRANSFER:
+            out["transfers"].append({"token": (lg.get("address") or "").lower(), "from": to_addr(tp[1]), "to": to_addr(tp[2]),
+                                     "amount": to_int(lg.get("data") or "0x0")})
 
 
 async def trace_tx(rpc, txhash, diff=True):

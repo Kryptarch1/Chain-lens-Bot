@@ -142,6 +142,8 @@ class RPC:
                 low = msg.lower()
                 if "revert" in low or (self._is_range_err(msg) and url == pool[-1]) or len(pool) == 1:
                     raise last
+                if self._is_range_err(msg):
+                    continue  # "narrow the range / too many logs" is about the query, not the endpoint: never mark it bad
                 if any(w in low for w in self.SWITCH_WORDS):
                     self._bad[url] = time.time()
                     continue

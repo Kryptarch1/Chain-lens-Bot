@@ -141,36 +141,58 @@ async def removal_powers(rpc, info, a, ctx=(), nft=False):
                 if ok:
                     callable_by.append(label)
         # trace it (no guessing from names): does the call actually take liquidity out of the pool?
-        sets = argsmod.traced_sets(args, [x for _, x in senders] + [c for c in ctx if c and c != ZERO], STRANGER)
-        if sets and not getattr(rpc, "no_debug", False):
-            from lib import tracer
-            runs = []
-            for label, sender in senders:
-                for data, nonzero in sets:
-                    runs.append((label, nonzero, tracer.trace_call(rpc, sender, a, sel + data, diff=False)))
+        from lib import tracer
+
+        async def run(sets):
+            runs = [(label, nz, tracer.trace_or_sim(rpc, sender, a, sel + data, val)) for label, sender in senders for data, nz, val in sets]
             res = await asyncio.gather(*[r for _, _, r in runs], return_exceptions=True)
             ran = [(label, nz, tr) for (label, nz, _), tr in zip(runs, res) if isinstance(tr, dict) and not tr.get("error")]
             # handing the LP position NFT out of the holder contract is as good as pulling it (the receiver can then remove it)
             pulls = sorted({label for label, _, tr in ran if tr.get("liq_removed") or
                             (nft and any(t["from"].lower() == a.lower() for t in tr.get("nft_out", [])))})
             if pulls:
-                traced = "pulls liquidity"
-                callable_by = sorted(set(callable_by) | set(pulls))
-            elif any(nz for _, nz, _ in ran):
-                # ran with real (nonzero) values and moved no liquidity: a fee/claim function, not a removal
-                traced = "runs, removes no liquidity"
-            elif all(tr is None for tr in res):
-                traced = None  # no debug support
-            else:
-                traced = "unresolved (reverts with test args)"
+                return "pulls liquidity", pulls
+            if any(nz for _, nz, _ in ran):
+                return "runs, removes no liquidity", []  # ran with real (nonzero) values, moved no liquidity: fee/claim fn
+            if res and all(tr is None for tr in res):
+                return None, []  # neither tracing nor simulation available
+            return ("unresolved (reverts with test args)" if res else None), []
+
+        invented = [(d, nz, 0) for d, nz in argsmod.traced_sets(args, [x for _, x in senders] + [c for c in ctx if c and c != ZERO], STRANGER)]
+        traced, pulls = await run(invented) if invented else (None, [])
+        if traced not in ("pulls liquidity", "runs, removes no liquidity"):
+            # invented args can't reach it (strings, structs, or args unknown): replay REAL past calls (exact calldata + value)
+            real = [(t["input"][10:], True, int(t.get("value") or 0)) for t in await past_calls(rpc, a, sel)]
+            if real:
+                t2, p2 = await run(real)
+                if t2:
+                    traced, pulls = (t2 + " (replayed real past calls)" if t2 != "pulls liquidity" else t2), p2
+        callable_by = sorted(set(callable_by) | set(pulls))
         results.append({"fn": nm, "args": args, "callable_by": callable_by, "traced": traced})
 
     await asyncio.gather(*[one(*c) for c in cands[:12]])
     return results
 
 
+async def past_calls(rpc, a, sel, n=2):
+    """Up to n successful past txs that called `sel` on contract a (from the explorer), newest first."""
+    try:
+        rows = await explorer.Explorer(rpc.name).txlist(a, 200)
+    except Exception:
+        return []
+    sel = sel.lower().removeprefix("0x")
+    return [t for t in rows if (t.get("input") or "").lower().startswith("0x" + sel) and str(t.get("isError", "0")) == "0"
+            and (t.get("to") or "").lower() == a.lower()][:n]
+
+
 STRANGER = "0x000000000000000000000000000000000000bEEF"
 CALLBACKS = ("unlockCallback", "lockAcquired", "uniswapV3MintCallback", "uniswapV3SwapCallback", "pancakeV3", "before", "after")
+
+
+async def pool_tokens(rpc, pool):
+    """token0/token1 of a v2/v3 pool -> test arguments for removal-like fns (collect(token), withdraw(token)...)."""
+    r = await asyncio.gather(rpc.try_call(pool, encode_call("token0()")), rpc.try_call(pool, encode_call("token1()")))
+    return tuple(to_addr(x[1]) for x in r if x[0] and x[1] and len(x[1]) >= 66)
 
 
 async def v2_lp(rpc, ex, pair, creator=None):
@@ -195,11 +217,13 @@ async def v2_lp(rpc, ex, pair, creator=None):
     out["holders"].sort(key=lambda x: -x["pct"])
     burned = sum(h["pct"] for h in out["holders"] if h["who"] in ("dead", "zero"))
     out["burned_pct"] = burned
+    toks = await pool_tokens(rpc, pair)
+
     async def inspect(h):
         info = await contract_kind(rpc, ex, h["address"])
         h["info"] = info
         if info["kind"] == "contract":
-            info["removal"] = await removal_powers(rpc, info, h["address"])
+            info["removal"] = await removal_powers(rpc, info, h["address"], toks)
     await asyncio.gather(*[inspect(h) for h in out["holders"][:4] if h["who"] not in ("dead", "zero")])
     return out
 
@@ -247,10 +271,12 @@ async def v3_lp(rpc, ex, pool, from_block, to_block, nfpm_hint=None):
     out["positions"].sort(key=lambda p: -(p.get("liq") or 0))
     live = [p for p in out["positions"] if p.get("owner") and p["owner"].startswith("0x") and p.get("liq")][:8]
 
+    toks = await pool_tokens(rpc, pool)
+
     async def inspect(p):
         p["info"] = await contract_kind(rpc, ex, p["owner"])
         if p["info"]["kind"] == "contract":
-            p["info"]["removal"] = await removal_powers(rpc, p["info"], p["owner"], nft=True)
+            p["info"]["removal"] = await removal_powers(rpc, p["info"], p["owner"], toks, nft=True)
     await asyncio.gather(*[inspect(p) for p in live])
     return out
 
@@ -491,9 +517,9 @@ def judge(lp):
         if info.get("kind") == "locker":
             locked += share; reasons.append(f"{share:.0f}% in {info['name']}"); continue
         if info.get("kind") == "contract":
-            rem = [r for r in info.get("removal", []) if r["callable_by"] and r.get("traced") != "runs, removes no liquidity"]
-            listed = [r for r in info.get("removal", []) if r.get("traced") != "runs, removes no liquidity"]
-            cleared = [r for r in info.get("removal", []) if r.get("traced") == "runs, removes no liquidity"]
+            rem = [r for r in info.get("removal", []) if r["callable_by"] and not (r.get("traced") or "").startswith("runs, removes no liquidity")]
+            listed = [r for r in info.get("removal", []) if not (r.get("traced") or "").startswith("runs, removes no liquidity")]
+            cleared = [r for r in info.get("removal", []) if (r.get("traced") or "").startswith("runs, removes no liquidity")]
             if rem:
                 unlocked += share
                 reasons.append(f"{share:.0f}% in {info['name']} {o} — removal callable by {','.join(rem[0]['callable_by'])} via {rem[0]['fn']}" +
