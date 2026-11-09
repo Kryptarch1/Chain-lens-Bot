@@ -320,7 +320,7 @@
   "rps": 40,
   "explorer": {
    "routescan": "https://elysium.kinetiq.xyz/api",
-   "web": "https://elysium.kinetiq.xyz/explorer"
+   "web": "https://elysium.kinetiq.xyz"
   },
   "v4": {
    "pool_manager": "0x06c63714fbf1f5753017123e2fcfdede4540b2c4",

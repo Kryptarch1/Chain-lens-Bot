@@ -133,7 +133,7 @@ Repo: Kryptarch1/Chain-lens-Bot (private). After ANY change here: `git add -A` (
 
 - ELYSIUM (Kinetiq's HyperEVM L2/Orbit, chain 99901, gas HYPE): OFFICIAL RPC https://rpc.elysium.kinetiq.xyz first (needs a browser
   User-Agent -> chains.json "headers"; 120 parallel reqs fine, eth_simulateV1, batches, full-range getLogs capped at 10k results;
-  debug_* needs an API key), https://rpc.elyscan.live as fallback (stalls at times). Explorer API (etherscan-style, wired as
+  debug_* needs an API key), https://rpc.elyscan.live as fallback (stalls at times). Explorer (links https://elysium.kinetiq.xyz/address/<a>; API etherscan-style, wired as
   "routescan"): https://elysium.kinetiq.xyz/api -> creator, txlist, internal, source. Funding via the native bridge shows as the
   dev's own address + 0x1111…1111 (Arbitrum alias). 0x7f84…6f15 / 0xe92f…593d = bridge payout wallets, NOT shared funders.
 - LP REMOVAL TRACING without debug_* (lib/tracer.trace_or_sim): eth_simulateV1 logs (ModifyLiquidity<0, DecreaseLiquidity, v2 Burn,
