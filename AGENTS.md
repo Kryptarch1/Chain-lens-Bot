@@ -138,7 +138,8 @@ Repo: Kryptarch1/Chain-lens-Bot (private). After ANY change here: `git add -A` (
   dev's own address + 0x1111…1111 (Arbitrum alias). 0x7f84…6f15 / 0xe92f…593d = bridge payout wallets, NOT shared funders.
 - LP REMOVAL TRACING without debug_* (lib/tracer.trace_or_sim): eth_simulateV1 logs (ModifyLiquidity<0, DecreaseLiquidity, v2 Burn,
   NFT out). Pool token0/token1 are test args for v2/v3 holders (collect(token) etc.). Fns whose args can't be invented are
-  replayed from REAL past calls (explorer txlist, exact calldata + value); deadline-guarded ones stay UNCLEAR. Boxa is the main launchpad: no bonding curve, coins launch
+  replayed from REAL past calls (explorer txlist, exact calldata + value); deadline-guarded ones stay UNCLEAR.
+- ELYSIUM LAUNCHPADS: Boxa is the main launchpad: no bonding curve, coins launch
   straight into Boxa's OWN Uniswap-v4 copy (PoolManager 0x06c6…b2c4, hook 0xbcc1…6acc, launcher 0x00d4…d205; 1% hook fee, 30% to
   treasury, rest holder rewards/buybacks). Nothing "graduates".
 - V4 HOOK LP LOCK (lib/lp.py hook_blocks_removal): for every v4 position, if the hook has the beforeRemoveLiquidity permission, it is
