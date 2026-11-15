@@ -537,8 +537,8 @@ def answers(info, fns, probes, forkres, mints, lps):
     else:
         lp = lps[0]
         rs = lp.get("reasons") or []
-        key = next((r for r in rs if "can remove" in r or "callable by" in r or "removed" in r), rs[0] if rs else "")
         st = lp.get("status")
+        key = rs[0] if st == "LOCKED" and rs else next((r for r in rs if "can remove" in r or "callable by" in r or "removed" in r), rs[0] if rs else "")
         word = {"LOCKED": "YES", "UNLOCKED": "NO", "PULLED": "NO — ALREADY PULLED", "PARTIAL": "PARTLY", "UNCLEAR": "UNCLEAR"}.get(st, st)
         L.append(f"   LP locked?        {word} — {key}" + (" — BUT the pool's tokens can be taken without the LP (backdoor below)"
                                                             if info.get("steal") and st in ("LOCKED", "PARTIAL") else ""))

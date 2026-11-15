@@ -308,6 +308,26 @@ async def v4_current_liquidity(rpc, pm, pool_id, owner, tl, tu, salt_hex):
     return None
 
 
+def position_amounts(sqrtp, tl, tu, liq):
+    """(amount0, amount1) raw units a v3/v4 position of `liq` between ticks tl..tu holds at pool price sqrtp (X96)."""
+    import math
+    if not sqrtp or not liq:
+        return 0.0, 0.0
+    sp, sa, sb = sqrtp / 2 ** 96, math.pow(1.0001, tl / 2), math.pow(1.0001, tu / 2)
+    if sp <= sa:
+        return liq * (sb - sa) / (sa * sb), 0.0
+    if sp >= sb:
+        return 0.0, liq * (sb - sa)
+    return liq * (sb - sp) / (sp * sb), liq * (sp - sa)
+
+
+def position_value(sqrtp, tl, tu, liq):
+    """Value of a position in token1 units at the current price: comparable across ranges (raw liquidity is not:
+    a full-range position holding most of the pool has FAR fewer liquidity units than a narrow one)."""
+    a0, a1 = position_amounts(sqrtp, tl, tu, liq)
+    return a0 * (sqrtp / 2 ** 96) ** 2 + a1, a0, a1
+
+
 async def v4_pool_liquidity(rpc, pm, pool_id):
     """Active (in-range) liquidity of a v4 pool, straight from PoolManager storage: pools[id].liquidity (slot +3)."""
     base = int.from_bytes(_keccak(bytes.fromhex(pool_id[2:]) + (6).to_bytes(32, "big")), "big")
@@ -428,11 +448,20 @@ async def v4_lp(rpc, ex, cfg, pool_id, from_block, to_block, seed_txs=(), init_h
         top = list(net)[:20]
     out["n_positions_seen"] = len(net)
     cur = await asyncio.gather(*[v4_current_liquidity(rpc, pm, pool_id, s_, a, b, sa) for (s_, a, b, sa) in top])
-    live = sorted([(k, c) for k, c in zip(top, cur) if c], key=lambda x: -x[1])[:8]
+    from lib import v4hook
+    try:
+        sqrtp = (await v4hook.pool_state(rpc, pm, pool_id))["sqrtp"]
+    except Exception:
+        sqrtp = 0
+    vals = {k: position_value(sqrtp, k[1], k[2], c) for k, c in zip(top, cur) if c}
+    # rank by what each position HOLDS now (raw liquidity units rank a full-range position far too low)
+    live = sorted([(k, c) for k, c in zip(top, cur) if c], key=lambda x: -(vals[x[0]][0] if sqrtp else x[1]))[:12]
 
     async def one(k, liq):
         sender, tl, tu, salt = k
         p = {"sender": sender, "liq": liq, "ticks": (tl, tu), "salt": salt}
+        if sqrtp and k in vals:
+            p["value"], p["amt0"], p["amt1"] = vals[k]
         nft_owner = None
         if not posm and int(salt, 16):
             # no position manager configured (chains with many v4 copies): a sender that answers ownerOf(salt) is one
@@ -455,8 +484,20 @@ async def v4_lp(rpc, ex, cfg, pool_id, from_block, to_block, seed_txs=(), init_h
                 p["info"]["removal"] = await removal_powers(rpc, p["info"], p["owner"], (out.get("key") or ())[:2], nft=True)
         return p
     out["positions"] = list(await asyncio.gather(*[one(k, liq) for k, liq in live]))
-    out["positions"].sort(key=lambda x: -x["liq"])
+    out["positions"].sort(key=lambda x: -(x.get("value") if x.get("value") is not None else x["liq"]))
     return out
+
+
+def _one_sided(lp, p):
+    """'holds only <token>, no <quote>' when a position holds just the launched token: pulling it takes no quote out of the pool."""
+    key = lp.get("key") or ()
+    q = (lp.get("quote_addr") or "").lower()
+    if p.get("value") is None or len(key) < 2 or not q:
+        return None
+    qa, ta = (p["amt0"], p["amt1"]) if key[0].lower() == q else (p["amt1"], p["amt0"])
+    if ta > 0 and qa <= ta * 1e-9:
+        return f"holds only the token, no {lp.get('quote') or 'quote'} — pulling it takes no {lp.get('quote') or 'quote'} out of the pool"
+    return None
 
 
 def judge(lp):
@@ -501,10 +542,12 @@ def judge(lp):
     own_rem = [r for r in rem if (r["by"].lower(), r.get("salt")) in owners]
     if own_rem:
         reasons.append(f"{len(own_rem)} past removal(s) by current LP holders, latest tx {own_rem[-1]['tx']}")
-    total = sum(p.get("liq") or 0 for p in pos) or 1
+    by_value = all(p.get("value") is not None for p in pos) and sum(p["value"] for p in pos) > 0
+    w = (lambda p: p["value"]) if by_value else (lambda p: p.get("liq") or 0)
+    total = sum(w(p) for p in pos) or 1
     unlocked = locked = 0
     for p in pos:
-        share = 100 * (p.get("liq") or 0) / total
+        share = 100 * w(p) / total
         o = p.get("owner") or ""
         info = p.get("info", {})
         if p.get("hook_lock"):
@@ -513,7 +556,9 @@ def judge(lp):
         if o.startswith("BURNED") or o.lower() in (ZERO, DEAD):
             locked += share; reasons.append(f"{share:.0f}% burned (position NFT sent to burn address)" if not o.startswith("BURNED") else f"{share:.0f}% burned (NFT destroyed)"); continue
         if info.get("kind") == "eoa":
-            unlocked += share; reasons.append(f"{share:.0f}% owned by plain wallet {o} — can remove any time"); continue
+            unlocked += share
+            one_side = _one_sided(lp, p)
+            reasons.append(f"{share:.0f}% owned by plain wallet {o} — can remove any time" + (f" ({one_side})" if one_side else "")); continue
         if info.get("kind") == "locker":
             locked += share; reasons.append(f"{share:.0f}% in {info['name']}"); continue
         if info.get("kind") == "contract":
@@ -538,6 +583,13 @@ def judge(lp):
             else:
                 locked += share
                 reasons.append(f"{share:.0f}% in {info['name']} {o} — no removal function found" + (" (verified)" if info.get("verified") else " (UNVERIFIED)"))
+    # every pullable position holds only the launched token (side "limit-sell" ranges, launchpad LP slots): the quote side
+    # (ETH etc.) all sits in locked/burned positions, so pulling them can't take quote out of the pool
+    side = [p for p in pos if (p.get("info") or {}).get("kind") == "eoa"]
+    if by_value and side and locked >= 50 and all(_one_sided(lp, p) for p in side):
+        q = lp.get("quote") or "quote"
+        return "LOCKED", [f"all {q} liquidity is locked ({locked:.0f}% of the pool's value) — the {len(side)} plain-wallet position(s) "
+                          f"({unlocked:.0f}%) hold only the token: pulling them takes no {q} out, but they can withdraw and sell those tokens"] + reasons
     if unlocked >= 50:
         return "UNLOCKED", reasons
     if locked >= 95:
@@ -582,6 +634,8 @@ async def analyze_pair(rpc, ex, cfg, pair, creator=None, created_ts=None):
     lp["dex"] = dex; lp["labels"] = labels; lp["liq_usd"] = (pair.get("liquidity") or {}).get("usd")
     lp["quote_balance"] = pair.get("quote_balance")
     lp["quote"] = (pair.get("quoteToken") or {}).get("symbol")
+    qa = ((pair.get("quoteToken") or {}).get("address") or "").lower()
+    lp["quote_addr"] = ZERO if qa in ("0x0000000000000000000000000000000000000000", "") and lp.get("type") == "v4" and (lp.get("key") or ("",))[0] == ZERO else qa
     lp["status"], lp["reasons"] = judge(lp)
     return lp
 

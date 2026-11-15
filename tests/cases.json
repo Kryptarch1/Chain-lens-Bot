@@ -18,7 +18,7 @@
   "must_contain": [
    "LP PULLED"
   ],
-  "why": "liquidity held by dev-owned EdomaeLpManager, then removed (tx 0x9304c8e3\u2026)"
+  "why": "liquidity held by dev-owned EdomaeLpManager, then removed (tx 0x9304c8e3…)"
  },
  {
   "name": "ONDEX",
@@ -37,7 +37,7 @@
   "token": "0xBc2283d12B1f2f46c1613AE672E95C55b69Ca414",
   "expect": "NOT SAFE",
   "must_contain": [],
-  "why": "clean ERC-20 but 99% of main-pool LP (NFT #3668117) in a plain wallet \u2014 regression: pool start-block estimate overshot on rh and missed the add \u2192 false 'PULLED' (fixed 2026-10-17)",
+  "why": "clean ERC-20 but 99% of main-pool LP (NFT #3668117) in a plain wallet — regression: pool start-block estimate overshot on rh and missed the add → false 'PULLED' (fixed 2026-10-17)",
   "drift": [
    "0x04954601f26af8e68fa4ad0adb56bddff00649fa",
    "can remove any time"
@@ -64,7 +64,7 @@
    "LP PULLED",
    "0x9184a1465a19713ba8d02e310088e39ae2e711f6b8c6e194285e32429482bd86"
   ],
-  "why": "dev pulled the v4 LP (NFT #467523) on 2026-10-16 16:44 UTC, tx 0x9184a146\u2026"
+  "why": "dev pulled the v4 LP (NFT #467523) on 2026-10-16 16:44 UTC, tx 0x9184a146…"
  },
  {
   "name": "SIM-PAD",
@@ -74,7 +74,7 @@
   "must_contain": [
    "liquidity already removed"
   ],
-  "why": "LP already pulled on 2026-10-16 \u2014 rug sim must report it, not try to pull again"
+  "why": "LP already pulled on 2026-10-16 — rug sim must report it, not try to pull again"
  },
  {
   "name": "SIM-MILL",
@@ -133,9 +133,9 @@
   "must_contain": [
    "hook takes 4.00%",
    "real v4 swaps through the PoolManager",
-   "afterSwap \u2192 PoolManager.mint"
+   "afterSwap → PoolManager.mint"
   ],
-  "why": "4% fee hook (afterSwapReturnDelta) \u2014 fee must be MEASURED from real v4 swaps (was missed once)"
+  "why": "4% fee hook (afterSwapReturnDelta) — fee must be MEASURED from real v4 swaps (was missed once)"
  },
  {
   "name": "DEEP-IMDO",
@@ -145,10 +145,10 @@
    "--deep"
   ],
   "must_contain": [
-   "0xaa90\u2026c3f7 (native)",
+   "0xaa90…c3f7 (native)",
    "lowerFee(uint16)"
   ],
-  "why": "UNVERIFIED fee hook: 1.5% to treasury 0xaa90\u2026c3f7 in ETH; lowerFee owned by Safe 2-of-3 \u2014 measured without source",
+  "why": "UNVERIFIED fee hook: 1.5% to treasury 0xaa90…c3f7 in ETH; lowerFee owned by Safe 2-of-3 — measured without source",
   "drift": [
    "hook takes 1.50%"
   ]
@@ -212,10 +212,10 @@
   "token": "0xed3e488d61b9ec88bf4dd80961846d7c97e6e943",
   "args": [],
   "must_contain": [
-   "Serial dev?       YES \u2014 3 earlier coins",
+   "Serial dev?       YES — 3 earlier coins",
    "kazino.click (KAZINO) 0xca416726fe446e576bcfdd948d650f482a3262d7"
   ],
-  "why": "NEXTIME: the dev launched 3 coins in the 3 hours before (through its own launch contract) \u2014 the $300 miss"
+  "why": "NEXTIME: the dev launched 3 coins in the 3 hours before (through its own launch contract) — the $300 miss"
  },
  {
   "name": "FARCASTER-DEV",
@@ -226,7 +226,7 @@
    "Dev identity?     DEV: @benleventhal",
    "verified (signed) by @benleventhal"
   ],
-  "why": "PIZZA: dev wallet 0x1541\u20267d59 is a Farcaster-verified address of @benleventhal (Blackbird founder) \u2014 identity proof the explorer never shows"
+  "why": "PIZZA: dev wallet 0x1541…7d59 is a Farcaster-verified address of @benleventhal (Blackbird founder) — identity proof the explorer never shows"
  },
  {
   "name": "BACKDOOR-TRANSFERFROM",
@@ -234,7 +234,7 @@
   "token": "0xba183698294a30804df16f2aad3106bb3facfa28",
   "args": [],
   "must_contain": [
-   "BACKDOOR: 0xb8ff\u20267357 can move ANY holder's tokens without approval",
+   "BACKDOOR: 0xb8ff…7357 can move ANY holder's tokens without approval",
    "pool drain via approval-free transferFrom",
    "VERDICT: NOT SAFE"
   ],
@@ -278,7 +278,7 @@
    "ALREADY PULLED",
    "0x1f9b957071228a3190280e062cc62a3f66b6a13a"
   ],
-  "why": "raw deploy on a non-Boxa Elysium PoolManager (0x5fb0\u20269600): pool found via any_manager, LP pull seen"
+  "why": "raw deploy on a non-Boxa Elysium PoolManager (0x5fb0…9600): pool found via any_manager, LP pull seen"
  },
  {
   "name": "ELY-NFTPOS",
@@ -289,6 +289,17 @@
    "nft#8",
    "0x5d0cabb7e483199f939978879821705775c0b14b"
   ],
-  "why": "Elysium PoolManager 0xe2e1\u2026 with no configured posm: position NFT contract detected via ownerOf(salt)"
+  "why": "Elysium PoolManager 0xe2e1… with no configured posm: position NFT contract detected via ownerOf(salt)"
+ },
+ {
+  "name": "HUSH",
+  "chain": "eth",
+  "token": "0x7e1a4043ee369f988b8b09f2b16f8f9275c63763",
+  "expect_lp": "LOCKED",
+  "must_contain": [
+   "burned (position NFT sent to burn address)",
+   "hold only the token"
+  ],
+  "why": "Mntd launch: main full-range v4 position (NFT #514469, all the ETH) burned to 0xdead in the launch tx; 8+ wallets hold narrow token-only side positions. Raw liquidity units ranked the burned position 9th and the old [:8] cap dropped it -> false 'LP UNLOCKED'. Positions must be weighed by value at the current price."
  }
 ]
