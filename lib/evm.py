@@ -82,3 +82,10 @@ def hardcoded_addresses(code_hex):
         if m not in ("0" * 40, "f" * 40) and not m.startswith("0000000000000000"):
             seen.add("0x" + m)
     return sorted(seen)
+
+
+def delegation_7702(code):
+    """EIP-7702: a plain wallet that set code shows `0xef0100 || delegate` (23 bytes). -> delegate address or None.
+    Such an account is still controlled by its private key (it sends its own txs), so it must be treated as a wallet."""
+    c = (code or "").lower()
+    return "0x" + c[8:48] if c.startswith("0xef0100") and len(c) == 48 else None

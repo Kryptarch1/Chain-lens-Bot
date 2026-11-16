@@ -297,9 +297,19 @@
   "token": "0x7e1a4043ee369f988b8b09f2b16f8f9275c63763",
   "expect_lp": "LOCKED",
   "must_contain": [
-   "burned (position NFT sent to burn address)",
-   "hold only the token"
+   "burned (position NFT sent to burn address)"
   ],
-  "why": "Mntd launch: main full-range v4 position (NFT #514469, all the ETH) burned to 0xdead in the launch tx; 8+ wallets hold narrow token-only side positions. Raw liquidity units ranked the burned position 9th and the old [:8] cap dropped it -> false 'LP UNLOCKED'. Positions must be weighed by value at the current price."
+  "why": "Mntd launch: main full-range v4 position (NFT #514469, all the ETH) burned to 0xdead in the launch tx; 8+ wallets hold narrow token-only side positions. Raw liquidity units ranked the burned position 9th and the old [:8] cap dropped it -> false 'LP UNLOCKED'. Positions must be weighed by value at the current price. (2026-11-16: the side positions have since been removed, so this case now only proves the burned main LP is found.)"
+ },
+ {
+  "name": "PHIGHT",
+  "chain": "eth",
+  "token": "0x7efd78b1540a281ecc3f03da98f25d5fac46ffff",
+  "expect_lp": "LOCKED",
+  "must_contain": [
+   "HatcheryLaunchLocker",
+   "quote BITCOIN"
+  ],
+  "why": "Hatchery launch paired with BITCOIN (HPOS10I): DexScreener can't price that pool (liq None) so it sorted LAST and the check judged a $500 ETH pool other wallets opened -> false NOT SAFE. The pool created in the launch tx must be the main pool. The ETH pool's 0x72d9 holder is an EIP-7702 wallet (code 0xef0100..) that used to be called a locked contract."
  }
 ]

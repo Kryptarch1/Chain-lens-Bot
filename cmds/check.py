@@ -101,6 +101,7 @@ async def phase_a(rpc, ex, chain, token):
         info["pools_src"] = "on-chain scan"
     for p in info["pairs"]:
         p.setdefault("seed_txs", [info["created_tx"]] if info.get("created_tx") else [])
+    await promote_launch_pool(rpc, info, token)
     if (rpc.cfg.get("v4") or {}).get("any_manager"):
         # many PoolManagers on this chain: each v4 pool carries its own, and the main pool's becomes the chain's
         # v4 config for the rest of this check (LP, sell tests, hook sims all read rpc.cfg["v4"])
@@ -122,6 +123,42 @@ async def phase_a(rpc, ex, chain, token):
         info["impl_code"] = await rpc.code(info["impl"])
     info["address"] = token.lower()
     return info
+
+
+async def promote_launch_pool(rpc, info, token):
+    """The pool created in the token's own launch tx holds the dev's liquidity. DexScreener can't price pools quoted in
+    another meme/launchpad token (liquidity usd = None), so sorting by USD put it LAST and the check judged some later
+    pool a stranger opened (PHIGHT: Hatchery launch pool paired with BITCOIN, locked; a $500 ETH side pool, unlocked).
+    If an unpriced launch pool still holds live liquidity, it becomes the main pool; the market line keeps the priced pair."""
+    pairs = info["pairs"]
+    if not info.get("created_tx") or len(pairs) < 2:
+        return
+    try:
+        launch = await asyncio.wait_for(discover.pools_from_receipts(rpc, [info["created_tx"]], token), 8)
+    except Exception:
+        return
+    ids = {p["pairAddress"].lower() for p in launch}
+    if not ids or pairs[0]["pairAddress"].lower() in ids:
+        return
+    lp_by_id = {p["pairAddress"].lower(): p for p in launch}
+    for i, p in enumerate(pairs):
+        pid = p["pairAddress"].lower()
+        if pid not in ids or (p.get("liquidity") or {}).get("usd") is not None:
+            continue
+        if len(pid) == 66:  # v4: must still hold liquidity in its PoolManager
+            from lib import lp as _lp
+            pm = p.get("pm") or lp_by_id[pid].get("pm") or (rpc.cfg.get("v4") or {}).get("pool_manager")
+            if not pm or not await _lp.v4_pool_liquidity(rpc, pm, pid):
+                continue
+            p.setdefault("pm", pm)
+        info["market_pair"] = pairs[0]
+        p["launch_pool"] = True
+        if ((p.get("quoteToken") or {}).get("address") or "").lower() in ("", token.lower()):
+            # DexScreener lists the pair the other way round (our token as quote): the real quote is its base token
+            p["quoteToken"] = p.get("baseToken") if ((p.get("baseToken") or {}).get("address") or "").lower() not in ("", token.lower()) \
+                else lp_by_id[pid].get("quoteToken")
+        pairs.insert(0, pairs.pop(i))
+        return
 
 
 async def phase_b(info):
@@ -734,7 +771,7 @@ def render(chain, token, info, fns, probes, cands, forkres, mints, lps, ex, t0):
     if gp:
         L.append(f"   goplus: honeypot {gp.get('is_honeypot')} mintable {gp.get('is_mintable')} blacklist {gp.get('is_blacklisted')} tax {gp.get('buy_tax')}/{gp.get('sell_tax')} holders {gp.get('holder_count')} (cross-check only)")
     if info["pairs"]:
-        p = info["pairs"][0]
+        p = info.get("market_pair") or info["pairs"][0]
         if p.get("src") == "onchain":
             L.append(f"== MARKET (not on DexScreener; {len(info['pairs'])} pool(s) found by on-chain scan from block {info.get('created_block')})")
         elif p.get("src") == "goplus":

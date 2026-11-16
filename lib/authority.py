@@ -40,6 +40,9 @@ async def controller_kind(rpc, ex, a, depth=0):
     code = await rpc.code(a)
     if len(code) <= 2:
         return {"kind": "eoa", "label": "plain wallet (one person, no delay)"}
+    from lib.evm import delegation_7702
+    if delegation_7702(code):
+        return {"kind": "eoa", "label": "plain wallet with EIP-7702 smart-account code (one person, no delay)"}
     out = {"kind": "contract"}
     ok, o = await rpc.try_call(a, encode_call("getOwners()"))
     ok2, t = await rpc.try_call(a, encode_call("getThreshold()"))

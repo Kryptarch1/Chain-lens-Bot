@@ -65,6 +65,9 @@ async def contract_kind(rpc, ex, a):
     code = await rpc.code(a)
     if len(code) <= 2:
         return {"kind": "eoa", "name": "plain wallet (EOA)"}
+    from lib.evm import delegation_7702
+    if delegation_7702(code):  # smart-account wallet: its key still signs txs, so it can remove liquidity any time
+        return {"kind": "eoa", "name": "plain wallet (EIP-7702 smart account)", "delegate": delegation_7702(code)}
     fns = ("owner()", "controller()", "admin()", "getOwner()")
     src, rs = await asyncio.gather(ex.source(a), rpc.batch([("eth_call", [{"to": a, "data": encode_call(fn)}, "latest"]) for fn in fns]))
     owner = controller = None
