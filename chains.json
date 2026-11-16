@@ -239,10 +239,12 @@
   "id": 196,
   "symbol": "OKB",
   "rpc": [
-   "https://rpc.xlayer.tech",
-   "https://xlayerrpc.okx.com"
+   "https://xlayerrpc.okx.com",
+   "https://rpc.xlayer.tech"
   ],
   "logs_range": 100,
+  "batch_max": 10,
+  "no_sim": true,
   "explorer": {
    "web": "https://www.oklink.com/xlayer"
   },

@@ -300,8 +300,8 @@ def render(w, ex, sym):
                 L.append(f"     first funding tx {first['tx']}")
         elif fb.get("from"):
             L.append(f"   funded by {fb['from']} ({d.get('funder_label','?')})" + (f" tx {fb['tx']}" if fb.get('tx') else ""))
-        elif not d.get("history"):
-            L.append("   dev history: not available on this chain's explorer key")
+        if not d.get("history"):
+            L.append("   dev history + earlier coins: NOT CHECKED — this chain's explorer gives no wallet history")
         pc = d.get("past_coins")
         if pc:
             L.append(f"   earlier coins by this dev ({len(pc)}{'+' if len(pc) >= 30 else ''}):")

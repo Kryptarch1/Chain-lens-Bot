@@ -31,6 +31,32 @@ def resolve_chain(name):
     raise SystemExit(f"unknown chain {name}; known: {', '.join(CHAINS)}")
 
 
+
+# A private endpoint (Chainstack) that answers "services are paused / unpaid invoice" is skipped by every check for
+# PRIVATE_DOWN_TTL seconds: without this each call failed instead of moving on, forks never started, and the
+# Chainstack-sized log ranges / concurrency were used against public RPCs.
+PRIVATE_DOWN_TTL = 900
+BILLING_WORDS = ("paused", "unpaid", "invoice", "suspended")
+
+
+def _down_file(chain):
+    return os.path.join(ROOT, "data", f"private_down_{chain}")
+
+
+def private_down(chain):
+    try:
+        return time.time() - os.path.getmtime(_down_file(chain)) < PRIVATE_DOWN_TTL
+    except OSError:
+        return False
+
+
+def mark_private_down(chain):
+    try:
+        os.makedirs(os.path.join(ROOT, "data"), exist_ok=True)
+        open(_down_file(chain), "w").close()
+    except OSError:
+        pass
+
 class RPCError(Exception):
     pass
 
@@ -45,7 +71,7 @@ class RPC:
         self.private = None
         # private endpoints (keys/rpc_<chain>, first line = https URL) go first; never printed
         kf = os.path.join(ROOT, "keys", f"rpc_{self.name}")
-        if os.path.exists(kf):
+        if os.path.exists(kf) and not private_down(self.name):
             priv = [l.strip() for l in open(kf) if l.strip().startswith("http")]
             if priv:
                 self.urls = priv[:1] + [u for u in self.urls if u != priv[0]]
@@ -56,6 +82,7 @@ class RPC:
         if self.private:  # Chainstack Growth: 10,000 blocks per eth_getLogs
             self.logs_range = int(self.cfg.get("private_logs_range", 10000))
         self.sem = asyncio.Semaphore(self.cfg.get("rps", 12))
+        self.batch_max = int(self.cfg.get("batch_max", 50))  # learned downwards when a node says "too many calls in batch"
         if self.private:  # Chainstack Growth: 250 req/s plan-wide
             self.sem = asyncio.Semaphore(int(self.cfg.get("private_concurrency", 24)))
         self._id = 0
@@ -70,6 +97,12 @@ class RPC:
                                       timeout=aiohttp.ClientTimeout(total=40))
             RPC._sessions[key] = s
         return s
+
+    def _billing_check(self, url, status, body):
+        """Private endpoint paused for billing (Chainstack: 403 'services are paused due to unpaid invoices')."""
+        if url == self.private and any(w in (body or "").lower() for w in BILLING_WORDS):
+            mark_private_down(self.name)
+            self._bad[url] = time.time()
 
     def _ordered_urls(self, urls=None):
         urls = urls or self.urls
@@ -87,6 +120,9 @@ class RPC:
                             if r.status == 429 or r.status >= 500:
                                 raise RPCError(f"http {r.status}")
                             txt = await r.text()
+                            if r.status == 403:
+                                self._billing_check(url, r.status, txt)
+                                raise RPCError("http 403")
                     d = json.loads(txt)
                     return d
                 except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, RPCError) as e:
@@ -96,7 +132,7 @@ class RPC:
         raise RPCError(f"all endpoints failed for {self.name}: {last}")
 
     SWITCH_WORDS = ("current plan", "upgrade", "archive", "personal token", "pruned", "missing trie node", "allnodes", "specify an address", "free plan", "not supported", "unsupported", "forbidden", "rate", "too many",
-                    "quota", "capacity", "limit exceeded", "internal error", "timeout", "unavailable", "disabled", "not allowed")
+                    "quota", "capacity", "limit exceeded", "internal error", "timeout", "unavailable", "disabled", "not allowed", "paused", "unpaid", "invoice", "suspended")
     RANGE_WORDS = ("block range", "range", "exceeds max", "too large", "more than", "max blocks", "narrow")
 
     def _is_range_err(self, msg):
@@ -146,6 +182,8 @@ class RPC:
                     continue  # "narrow the range / too many logs" is about the query, not the endpoint: never mark it bad
                 if any(w in low for w in self.SWITCH_WORDS):
                     self._bad[url] = time.time()
+                    if url == self.private and any(w in low for w in BILLING_WORDS):
+                        mark_private_down(self.name)
                     continue
                 raise last
             return d["result"]
@@ -160,6 +198,7 @@ class RPC:
                         if r.status == 429:
                             raise RPCError("http 429")
                         if r.status >= 500 or r.status == 403:
+                            self._billing_check(url, r.status, await r.text())
                             raise RPCError(f"http {r.status}")
                         txt = await r.text()
                 d = json.loads(txt)
@@ -177,13 +216,21 @@ class RPC:
     async def batch(self, calls, chunk=50):
         """calls: list of (method, params). Returns list of results (None on per-item error)."""
         out = [None] * len(calls)
+        chunk = min(chunk, self.batch_max)
 
-        async def one(start):
-            items = calls[start:start + chunk]
+        async def one(start, size):
+            items = calls[start:start + size]
             payload = [{"jsonrpc": "2.0", "id": start + i, "method": m, "params": p} for i, (m, p) in enumerate(items)]
             try:
                 d = await self._post(payload)
                 if isinstance(d, dict):  # batch unsupported -> fall back
+                    msg = str((d.get("error") or {}).get("message", "")).lower() if isinstance(d.get("error"), dict) else ""
+                    if size > 1 and "batch" in msg and any(w in msg for w in ("too many", "too large", "exceed", "limit")):
+                        # the node caps batch size (X Layer: 10): remember a smaller size and resend in pieces
+                        half = max(1, size // 2)
+                        self.batch_max = min(self.batch_max, half)
+                        await asyncio.gather(*[one(s, half) for s in range(start, start + len(items), half)])
+                        return
                     raise RPCError("batch unsupported")
                 for item in d:
                     if "result" in item:
@@ -193,7 +240,7 @@ class RPC:
                 for i, r in enumerate(res):
                     out[start + i] = r
 
-        await asyncio.gather(*[one(s) for s in range(0, len(calls), chunk)])
+        await asyncio.gather(*[one(s, chunk) for s in range(0, len(calls), chunk)])
         return out
 
     async def _safe(self, method, params):

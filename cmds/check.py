@@ -88,10 +88,19 @@ async def phase_a(rpc, ex, chain, token):
         info["created_block"], info["created_tx"] = await asyncio.wait_for(discover.creation_block(rpc, ex, token, hint), 15)
     except asyncio.TimeoutError:
         info["created_block"], info["created_tx"] = None, None
+    if not info["creator"] and info.get("created_tx"):
+        # no explorer creator API (X Layer…): the creation tx's sender, read on-chain
+        try:
+            t = await rpc.call("eth_getTransactionByHash", [info["created_tx"]])
+            info["creator"] = (t or {}).get("from")
+        except Exception:
+            pass
+    if not info["creator"] and (gpl or {}).get("creator_address"):
+        info["creator"] = gpl["creator_address"].lower()  # GoPlus, last resort
     if info["created_block"] and not info["pairs"]:
         found = await discover.pools_from_receipts(rpc, [info["created_tx"]], token) if info.get("created_tx") else []
         if not found:
-            found = await discover.pools_from_transfers(rpc, ex, token)
+            found = await discover.pools_from_transfers(rpc, ex, token, info["created_block"])
         if not found:
             try:
                 found = await asyncio.wait_for(discover.find_pools(rpc, token, info["created_block"]), 20)
@@ -708,6 +717,10 @@ def answers(info, fns, probes, forkres, mints, lps):
     elif pc == [] and dev.get("history"):
         L.append("   Serial dev?       NO — " + (f"no earlier coin in its newest 1000 txs (of {dev.get('nonce')})"
                                                if dev.get("deploys_floor") else "first coin from this wallet"))
+    elif dev.get("address") and not dev.get("history"):
+        web = info.get("_explorer_web") or ""
+        L.append(f"   Serial dev?       NOT CHECKED — no wallet history API on {info.get('_chain', 'this chain')} ({dev.get('nonce', '?')} txs from the dev)"
+                 + (f": look at {web}/address/{dev['address']}" if web else ""))
     who = (forkres or {}).get("_who") or {}
     if who.get("farcaster"):
         from lib import farcaster
@@ -883,6 +896,7 @@ async def main(chain, token, fast=False, as_json=False):
         reads = asyncio.create_task(timed("reads", phase_a(rpc, ex, rpc.name, token), 45, None, extra))
     info = await reads
     if info is not None:
+        info["_chain"], info["_explorer_web"] = rpc.name, ((rpc.cfg.get("explorer") or {}).get("web") or "").rstrip("/")
         info["_recent_only"] = (rpc.cfg.get("logs_recent_only") or rpc.cfg.get("logs_unreliable")) and not getattr(rpc, "private", None)
     if info is None:
         print(f"could not read {token} on {rpc.name}: {'; '.join(extra)}"); return

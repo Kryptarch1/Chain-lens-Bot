@@ -47,23 +47,36 @@ async def creation_block(rpc, ex, addr, hint_ts=None):
     try:
         hi = await rpc.block_number()
         lo = 0
-        code = await rpc.call("eth_getCode", [addr, hex(max(1, hi - 1))])
+        # verify the node really serves historical state: code must NOT exist at block 1
+        code, early = await asyncio.gather(rpc.call("eth_getCode", [addr, hex(max(1, hi - 1))]), rpc.call("eth_getCode", [addr, hex(1)]))
         if len(code) <= 2:
             return None, None
-        # verify the node really serves historical state: code must NOT exist at block 1
-        early = await rpc.call("eth_getCode", [addr, hex(1)])
         if len(early) > 2:
             return None, None  # node ignores the block param (e.g. HyperEVM public RPC)
-        for _ in range(40):
+        # 64-way search: one batch of 63 probes per round (~5 rounds for 100M blocks instead of ~27 serial calls)
+        for _ in range(20):
             if hi - lo <= 1:
                 break
-            mid = (lo + hi) // 2
-            c = await rpc.call("eth_getCode", [addr, hex(mid)])
-            if len(c) > 2:
-                hi = mid
-            else:
-                lo = mid
-        return hi, None
+            pts = sorted({lo + (hi - lo) * k // 64 for k in range(1, 64)} - {lo, hi})
+            res = await rpc.batch([("eth_getCode", [addr, hex(b)]) for b in pts])
+            if any(r is None for r in res):  # a probe failed: one exact midpoint step instead
+                mid = (lo + hi) // 2
+                c = await rpc.call("eth_getCode", [addr, hex(mid)])
+                lo, hi = (lo, mid) if len(c) > 2 else (mid, hi)
+                continue
+            for b, c in zip(pts, res):
+                if len(c) > 2:
+                    hi = b
+                    break
+                lo = b
+        # the creation tx: the token's first mint (Transfer from 0x0) in that block, one getLogs call
+        tx = None
+        try:
+            logs = await rpc.call("eth_getLogs", [{"address": addr, "topics": [TRANSFER_T, ZERO_T], "fromBlock": hex(hi), "toBlock": hex(hi)}])
+            tx = logs[0]["transactionHash"] if logs else None
+        except Exception:
+            pass
+        return hi, tx
     except RPCError:
         return None, None
 
@@ -211,9 +224,19 @@ async def pools_from_receipts(rpc, txs, token):
     return pools
 
 
-async def pools_from_transfers(rpc, ex, token):
-    """Use the token's first transfers (explorer) to find its pools: recipients that are pools, or txs that touched the v4 PoolManager."""
+async def pools_from_transfers(rpc, ex, token, from_block=None):
+    """Use the token's first transfers to find its pools: recipients that are pools, or txs that touched the v4 PoolManager.
+    Transfers come from the explorer; with no explorer API (X Layer…) from the token's own Transfer logs after its
+    creation block — 1 log query per chunk instead of find_pools' 8 topic scans (slow, capped public RPCs)."""
     txs = await ex.token_transfers(token, limit=100, sort="asc")
+    if not txs and from_block:
+        try:
+            latest = await rpc.block_number()
+            logs = await rpc.get_logs(token, [TRANSFER_T], from_block, min(latest, from_block + rpc.logs_range * 10))
+            txs = [{"to": topic_addr(l["topics"][2]), "hash": l["transactionHash"], "blockNumber": str(int(l["blockNumber"], 16))}
+                   for l in logs[:300] if len(l.get("topics") or []) >= 3]
+        except Exception:
+            txs = []
     if not txs:
         return []
     pm = (rpc.cfg.get("v4") or {}).get("pool_manager", "").lower()
