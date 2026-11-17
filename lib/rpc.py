@@ -57,6 +57,11 @@ def mark_private_down(chain):
     except OSError:
         pass
 
+def _batch_cap_err(msg):
+    m = (msg or "").lower()
+    return "batch" in m and any(w in m for w in ("too many", "too large", "exceed", "limit", "more than", "not allowed"))
+
+
 class RPCError(Exception):
     pass
 
@@ -223,9 +228,14 @@ class RPC:
             payload = [{"jsonrpc": "2.0", "id": start + i, "method": m, "params": p} for i, (m, p) in enumerate(items)]
             try:
                 d = await self._post(payload)
+                if isinstance(d, list) and size > 1:
+                    # some nodes answer a too-big batch per item (dRPC free: "Batch of more than 3 requests are not allowed")
+                    errs = [str((x.get("error") or {}).get("message", "")) for x in d if isinstance(x, dict) and isinstance(x.get("error"), dict)]
+                    if any(_batch_cap_err(e) for e in errs):
+                        d = {"error": {"message": next(e for e in errs if _batch_cap_err(e))}}
                 if isinstance(d, dict):  # batch unsupported -> fall back
                     msg = str((d.get("error") or {}).get("message", "")).lower() if isinstance(d.get("error"), dict) else ""
-                    if size > 1 and "batch" in msg and any(w in msg for w in ("too many", "too large", "exceed", "limit")):
+                    if size > 1 and _batch_cap_err(msg):
                         # the node caps batch size (X Layer: 10): remember a smaller size and resend in pieces
                         half = max(1, size // 2)
                         self.batch_max = min(self.batch_max, half)
