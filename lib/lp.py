@@ -570,8 +570,11 @@ def judge(lp):
             cleared = [r for r in info.get("removal", []) if (r.get("traced") or "").startswith("runs, removes no liquidity")]
             if rem:
                 unlocked += share
+                ctl = (info.get("controller") or info.get("owner") or "").lower()
                 reasons.append(f"{share:.0f}% in {info['name']} {o} — removal callable by {','.join(rem[0]['callable_by'])} via {rem[0]['fn']}" +
-                               (" (traced: pulls liquidity)" if rem[0].get("traced") == "pulls liquidity" else ""))
+                               (" (traced: pulls liquidity)" if rem[0].get("traced") == "pulls liquidity" else "") +
+                               (f" — its owner {ctl} IS THE TOKEN'S DEV" if ctl and ctl == lp.get("creator")
+                                else f" — its owner is {ctl}" if ctl else ""))
             elif not listed and cleared:
                 locked += share
                 reasons.append(f"{share:.0f}% in {info['name']} {o} — no removal path: {', '.join(r['fn'] for r in cleared[:3])} run but remove no liquidity (traced)")
@@ -638,6 +641,7 @@ async def analyze_pair(rpc, ex, cfg, pair, creator=None, created_ts=None):
     lp["quote_balance"] = pair.get("quote_balance")
     lp["quote"] = (pair.get("quoteToken") or {}).get("symbol")
     qa = ((pair.get("quoteToken") or {}).get("address") or "").lower()
+    lp["creator"] = (creator or "").lower()
     lp["quote_addr"] = ZERO if qa in ("0x0000000000000000000000000000000000000000", "") and lp.get("type") == "v4" and (lp.get("key") or ("",))[0] == ZERO else qa
     lp["status"], lp["reasons"] = judge(lp)
     return lp

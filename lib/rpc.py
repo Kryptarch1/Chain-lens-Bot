@@ -242,9 +242,22 @@ class RPC:
                         await asyncio.gather(*[one(s, half) for s in range(start, start + len(items), half)])
                         return
                     raise RPCError("batch unsupported")
+                retry = []
                 for item in d:
                     if "result" in item:
                         out[item["id"]] = item["result"]
+                    elif isinstance(item, dict) and isinstance(item.get("error"), dict):
+                        msg = str(item["error"].get("message", "")).lower()
+                        if "revert" not in msg and isinstance(item.get("id"), int) and start <= item["id"] < start + len(items):
+                            retry.append(item["id"])  # endpoint problem, not the call: redo it alone (normal failover)
+                        if self.private and any(w in msg for w in BILLING_WORDS):
+                            # Chainstack answers a batch with HTTP 200 + "services are paused" per item
+                            mark_private_down(self.name)
+                            self._bad[self.private] = time.time()
+                if retry:
+                    res = await asyncio.gather(*[self._safe(*calls[i]) for i in retry])
+                    for i, r in zip(retry, res):
+                        out[i] = r
             except RPCError:
                 res = await asyncio.gather(*[self._safe(m, p) for m, p in items])
                 for i, r in enumerate(res):
