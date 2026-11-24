@@ -242,6 +242,28 @@ async def profile_all(chain, d, n=20):
     wealth = await wealth_task
     xc_res, xc_notes = await xc_task
     notes += xc_notes
+    # full history on each other chain the wallet is active on (top 4 by recent activity / coins)
+    pairs = []
+    for a in addrs:
+        x = (xc_res or {}).get(a) or {}
+        cand = {}
+        for ch, v in (x.get("chains") or {}).items():
+            if ch != chain and ((v.get("d90") or 0) > 0 or v.get("total", 0) >= 20):
+                cand[ch] = (v.get("d30") or 0) + (v.get("total") or 0) / 1000
+        for ch, rows in (x.get("coins") or {}).items():
+            if ch != chain:
+                cand[ch] = cand.get(ch, 0) + len(rows)
+        pairs += [(a, ch) for ch, _ in sorted(cand.items(), key=lambda kv: -kv[1])[:4]]
+    ch_hist = {}
+    if pairs:
+        from lib import chainhist
+        try:
+            ch_hist = await asyncio.wait_for(chainhist.collect(pairs, d["now"], prices), 150)
+        except Exception as e:
+            notes.append(f"other-chain history failed ({type(e).__name__})")
+        unread = sorted({ch for a in ch_hist for ch, v in ch_hist[a].items() if "free Etherscan" in (v.get("error") or "")})
+        if unread:
+            notes.append(f"other-chain history NOT readable on {', '.join(unread)} with the free Etherscan key (Etherscan Lite covers them)")
 
     # ---- assemble
     supply = d["supply"] / 10 ** d["decimals"]
@@ -300,7 +322,7 @@ async def profile_all(chain, d, n=20):
             "holdings": sorted(held[a], reverse=True)[:8], "holdings_usd": sum(u for u, _, _ in held[a]),
             "wealth": wealth.get(a, {}), "eth_usd": eth_usd,
             "protocols": [(c, names.get(c) or None, k) for c, k in prot.most_common(5)],
-            "xchain": xc_res.get(a),
+            "xchain": xc_res.get(a), "chain_hist": ch_hist.get(a),
         }
     notes.append(f"profiles: {len(targets)} wallets, history = newest 300 txs + 1000 token transfers each ({time.time() - t0:.1f}s)")
     return notes
@@ -323,8 +345,10 @@ def render(d, h):
     act = f"     activity: {p['txs_30d_before']} own txs in the 30 days before this buy"
     if p["last_any_before"]:
         act += f" · last activity of any kind before it: {_ago(bt, p['last_any_before'])} earlier"
+        other30 = sum((v.get("d30") or 0) for c, v in ((p.get("xchain") or {}).get("chains") or {}).items() if c != d["chain"])
         if p["dormant_days"] and p["dormant_days"] >= 30:
-            act += f"  ** DORMANT {p['dormant_days']:.0f} days, then bought this **"
+            act += (f"  ** DORMANT {p['dormant_days']:.0f} days on every chain, then bought this **" if not other30 else
+                    f" (quiet {p['dormant_days']:.0f} days on {d['chain']} but {other30} txs on other chains in the last 30 d: not dormant)")
     else:
         act += " · no activity before this buy in the history read (brand-new wallet)"
     if p.get("app_trader"):
@@ -367,6 +391,7 @@ def render(d, h):
         L.append("     money: " + " · ".join(m))
     if p["protocols"]:
         L.append("     uses: " + ", ".join(f"{n or c[:10] + '…'} ({k})" for c, n, k in p["protocols"]))
-    from lib import xchain
+    from lib import xchain, chainhist
     L += xchain.render(d["chain"], p.get("xchain"), now)
+    L += chainhist.render(p.get("chain_hist"), now)
     return L

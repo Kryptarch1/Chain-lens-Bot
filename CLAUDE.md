@@ -128,6 +128,12 @@ by none, or never moved with no live pool; mcap > 1000x liquidity shown as "thin
 (by depositor) and deBridge (filteredList filter=<address>). RELAY: /requests/v2 was retired 2026-11-24; lib/trace uses
 /requests/v3 with the x-api-key in keys/relay (relay_requests / relay_parse): by user for holder profiles, by
 fillTxHash for bridge-payout matching in money trails. No key -> Relay is reported as not read.
+OTHER-CHAIN HISTORY (lib/chainhist.py, inside the profiles): for each wallet's top 4 other active chains (txs in 90 d,
+>= 20 txs total, or coins traded there this week) the SAME deep history as the home chain, from that chain's explorer
+(tokentx 1000 + txlist 300): coins traded, alive/dead, bought < 1 h after launch, EARLY on coins now >= $1M, usual swap
+size, last active, holdings there. The free Etherscan key does NOT serve base, bsc, rh, arc (printed as "not readable")
+-> Etherscan Lite ($49/mo) on the same key unlocks them. DORMANT now means quiet on EVERY chain (a wallet quiet on eth
+but busy on bsc is shown as not dormant).
 ANSWER FORMAT (user rules): wallets only, no safety lines; EVERY wallet is a clickable explorer link; overview of the
 current situation first, then a section per top wallet; deep, not a summary table.
 
