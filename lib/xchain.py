@@ -29,12 +29,14 @@ def chain_name(cid):
         cid = int(cid)
     except Exception:
         return str(cid)
-    if cid > 100_000_000:
-        return f"deBridge-chain-{cid - 100_000_000}"  # deBridge's own ids for chains without an EVM id mapping we know
     for k, v in CHAINS.items():
         if v.get("id") == cid:
             return k
-    return EXTRA_IDS.get(cid, str(cid))
+    if cid in EXTRA_IDS:
+        return EXTRA_IDS[cid]
+    if 100_000_000 < cid < 101_000_000:
+        return f"deBridge-chain-{cid - 100_000_000}"  # deBridge's own ids for non-EVM-id chains
+    return str(cid)
 
 
 def private_chains():
@@ -122,6 +124,7 @@ async def _bridges(addr):
         out.append({"time": ts, "src": chain_name(src), "dst": chain_name(dst), "amount": ci.get("amountFormatted"),
                     "symbol": (ci.get("currency") or {}).get("symbol"), "out_symbol": (co.get("currency") or {}).get("symbol"),
                     "usd": float(ci.get("amountUsd") or 0), "via": "Relay"})
+    from lib.trace import _decimals
     for x in a if isinstance(a, list) else []:
         if x.get("status") not in ("filled", None):
             continue
@@ -129,16 +132,18 @@ async def _bridges(addr):
             ts = int(time.mktime(time.strptime((x.get("depositBlockTimestamp") or "")[:19], "%Y-%m-%dT%H:%M:%S"))) - time.timezone
         except Exception:
             ts = None
-        tok = x.get("token") or {}
         try:
-            amt = int(x.get("amount") or 0) / 10 ** int(tok.get("decimals") or 18)
+            dec = await _decimals(x.get("originChainId"), x.get("inputToken"))
+            amt = int(x.get("inputAmount") or 0) / 10 ** dec
         except Exception:
             amt = None
+        usd = float(x.get("inputPriceUsd") or 0) * (amt or 0)
         out.append({"time": ts, "src": chain_name(x.get("originChainId")), "dst": chain_name(x.get("destinationChainId")),
-                    "amount": f"{amt:.4g}" if amt is not None else None, "symbol": tok.get("symbol"), "out_symbol": None,
-                    "usd": float(x.get("inputPriceUsd") or 0) * (amt or 0) if x.get("inputPriceUsd") else 0.0, "via": "Across"})
+                    "amount": f"{amt:.4g}" if amt is not None else None, "symbol": "" if not usd else "", "out_symbol": None,
+                    "usd": usd, "via": "Across"})
     out.sort(key=lambda b: -(b["time"] or 0))
-    return out if (r is not None or a is not None or dl is not None) else None
+    read = [n for n, v in (("Relay", r), ("Across", a), ("deBridge", dl)) if v is not None]
+    return {"list": out, "read": read}
 
 
 async def collect(home, addrs, now=None):
@@ -167,14 +172,23 @@ async def collect(home, addrs, now=None):
         coins[ch] = r
     infos = await asyncio.gather(*[_ds_tokens(ch, sorted({t for a in coins[ch] for t in coins[ch][a]})) for ch in coins])
     info = dict(zip(coins, infos))
-    sem = asyncio.Semaphore(5)
+    sem = asyncio.Semaphore(3)
+
+    from lib import cache
 
     async def br(a):
+        k = f"bridges:{a}"
+        c = cache.get(k)
+        if c is not None:
+            return c
         async with sem:
             try:
-                return await asyncio.wait_for(_bridges(a), 20)
+                v = await asyncio.wait_for(_bridges(a), 25)
             except Exception:
                 return None
+        if len(v["read"]) >= 2:  # Across / deBridge rate-limit bursts: only remember answers from most sources
+            cache.set(k, v, ttl=3600)
+        return v
     brs = await asyncio.gather(*[br(a) for a in addrs])
     spray = {}
     for ch in coins:
@@ -186,7 +200,8 @@ async def collect(home, addrs, now=None):
         spray[ch] = {t for t in n_in if n_in[t] >= 4 and n_out[t] == 0}
     out = {}
     for a, b in zip(addrs, brs):
-        o = {"chains": {ch: act[ch][a] for ch in act if a in act[ch]}, "coins": {}, "bridges": b, "bridges_ok": b is not None}
+        o = {"chains": {ch: act[ch][a] for ch in act if a in act[ch]}, "coins": {}, "bridges": (b or {}).get("list"),
+             "bridges_read": (b or {}).get("read") or []}
         for ch in coins:
             rows = []
             for t, io in coins[ch].get(a, {}).items():
@@ -241,6 +256,9 @@ def render(home, x, now):
             f"{r['symbol']} " + ((_usd(r['mcap']) if r['mcap'] else "thin pool") if r["state"] == "alive" else r["state"]) + (" sold" if r["out"] else "")
             for r in traded[:7]))
     b = x.get("bridges")
+    read = x.get("bridges_read") or []
+    miss = [n for n in ("Relay", "Across", "deBridge") if n not in read]
+    tail = f" (not read: {', '.join(miss)})" if miss else ""
     if b:
         tot = sum(r["usd"] for r in b)
         routes = Counter(f"{r['src']}→{r['dst']}" for r in b)
@@ -248,9 +266,11 @@ def render(home, x, now):
         vias = "/".join(sorted({r["via"] for r in b}))
         L.append(f"     cross-chain swaps: {len(b)} ({vias}) " + (f"· ${tot:,.0f} moved " if tot else "") + "· routes: "
                  + ", ".join(f"{k} ×{v}" for k, v in routes.most_common(4))
-                 + f" · last: {last['src']}→{last['dst']} {last['amount']} {last['symbol']}"
+                 + f" · last: {last['src']}→{last['dst']} {last['amount'] or ''} {last['symbol'] or ''}".rstrip()
                  + (f" (${last['usd']:,.0f})" if last["usd"] else "")
-                 + (f", {_ago(now - last['time'])} ago" if last.get("time") else ""))
-    elif x.get("bridges_ok"):
-        L.append("     cross-chain swaps: none on Across / deBridge (Relay not readable: its API needs a key since 2026-11-24)")
+                 + (f", {_ago(now - last['time'])} ago" if last.get("time") else "") + tail)
+    elif read:
+        L.append(f"     cross-chain swaps: none on {', '.join(read)}{tail}")
+    else:
+        L.append("     cross-chain swaps: not read (bridge APIs rate-limited or down)")
     return L
