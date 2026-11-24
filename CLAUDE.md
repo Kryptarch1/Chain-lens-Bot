@@ -109,8 +109,20 @@ HOLDERS NOW; BIG BUYERS WHO LEFT (wallets that already dumped are invisible in a
 section); COLLECTORS / DISTRIBUTORS; the wallets that fed a collector; the DEV.
 Traps: a first-tx signer with >= 10,000 txs is a relayer / trading-bot service (many unrelated users) -> only a
 possible link; exchange-funded wallets share a funder without being linked; fee-on-transfer / reflection tokens make
-amounts approximate (a note is printed). Speed: ~15-25 s cold for ~90 wallets on eth (funder lookups, Etherscan free
-3 calls/s), ~3 s when cached. NOT built yet: each wallet's past coins and how they ended; saved wallet profiles.
+amounts approximate (a note is printed). Link tiers: [PROVEN] on-chain facts; [LIKELY] a payout service / exchange paid
+several holders the SAME amount within 10 blocks; POSSIBLE = patterns (same app relayer, same launch block, the dev's
+funder paid other holders near the dev's funding). A funder with >= 1,000 txs or shared by holders is checked: >= 20
+recipients in its last 200 txs = "payout service" (not proof). A first-tx signer whose txs (>= 50) almost all go to one
+router = trading-app relayer (not proof). A holder that funded another holder is PROVEN whatever its tx count.
+WALLET PROFILES (lib/wprofile.py, top 20 holders + dev, ~30 s; `--fast` skips them): activity before the buy and
+DORMANT (no activity of any kind >= 30 d), app-only traders (never sign; their money sits with the app, wealth reads $0),
+this buy in ETH + approx entry mcap + size vs the wallet's usual swap (OUT OF CHARACTER >= 3x), past coins (really traded:
+signed or later sent out) with today's state, early entries (< 1 h after the pool), EARLY on coins now >= $1M (needs
+>= $50k liquidity), wealth across eth/base/arb/bsc (native + stables), holdings of coins it traded (capped at pool
+liquidity; airdropped spam ignored), stablecoin moves >= $5k, contracts it calls most. Each profile = newest 300 txs +
+1000 token transfers, so "past coins" covers a window (printed), not the whole life of a busy wallet.
+ANSWER FORMAT (user rules): wallets only, no safety lines; EVERY wallet is a clickable explorer link; overview of the
+current situation first, then a section per top wallet; deep, not a summary table.
 
 ## Four questions (when the user asks "is it safe")
 1. Can the token hurt me? (mint, blacklist, pause, fees, proxy, hidden callers)
