@@ -69,6 +69,7 @@ dd code base 0xYourToken setFees
 | `dd code <chain> <addr> <fn>` | One function's real code + storage with live values + a traced call | ~1–7 s |
 | `dd sell <chain> <token>` | Stateful sell tests only | ~1–5 s |
 | `dd trace <chain> <wallet>` | Where a wallet's money came from, across bridges | ~2–10 s |
+| `dd holders <chain> <token>` | Who holds the token, how each wallet got it, linked groups (bundles, collectors), big buyers who already left | ~15–25 s |
 | `dd chains` | List supported chains | — |
 
 **Project analysis and toolkit** (`kit/`)
@@ -245,7 +246,7 @@ CLAUDE.md        working rules for the AI analyst (AGENTS.md: same, for Codex)
 - Findings marked **"read from code"** are inferred — simulations and traces are the proof.
 - Decompiled code is an interpretation; `dd code` adds a traced call as ground truth.
 - Chains on public RPCs (Sonic, MegaETH, Optimism) may lack tracing; a private fork is used instead.
-- Not yet covered: dev-linked "bundle" wallets buying at launch.
+- Linked "bundle" wallets: `dd holders`. Not yet covered: each holder's past coins.
 
 <div align="center">
 

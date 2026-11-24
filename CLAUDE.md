@@ -58,6 +58,7 @@ owner-only functions and says "ask for dd sim to confirm".
 | Deep check (stateful sell tests: delayed honeypot, sell caps, funds taken) — ONLY when asked | `dd check <chain> <token> --deep` or `dd sell <chain> <token>` |
 | What does this ONE function really do (read the code) | `dd code <chain> <address> <function>` (name, signature or selector; `--from 0x..` `--args a,b` to choose caller/args; works on proxies and hooks) |
 | Where did a wallet's money come from | `dd trace <chain> <wallet>` |
+| Who holds it / wallet analysis / bundles / "analyse the holders" | `dd holders <chain> <token>` (`--top N`, `--json`) — then write the deep analysis yourself (see HOLDERS below) |
 | Anything else (old toolkit) | `dd <chain> token|audit|cast|rpc|fork|wallet` |
 
 `dd check` covers: functions (bytecode → names → risky/unknown), who can call each privileged function
@@ -92,7 +93,24 @@ Sell-test fixtures (our own honeypot/delayed/cooldown/max-sell/drain tokens depl
 `.venv/bin/python tests/fixtures.py` — must pass after any sellsim change.
 
 Still manual (use cast / fork): functions that need specific args to simulate removal, dev-wallet
-history, holder clusters, tx explanations. Planned commands: `dd dev`, `dd cluster`, `dd watch`.
+history, tx explanations. Planned commands: `dd dev`, `dd watch`.
+
+## HOLDERS — wallet analysis (lib/holders.py, cmds/holders.py; 2026-11-24)
+`dd holders` is a FACT COLLECTOR; the product is the written analysis you do on top of it (the user wants that part
+deepest: the story of each top wallet, who is linked to whom and how sure, how the holder base formed, what is unusual,
+who really controls the supply, buyer quality, which wallets to watch, proven vs inferred vs not checked). Follow leads
+with `dd trace` / extra lookups when a wallet looks odd, then fold repeat lookups into the collector.
+What it prints: every Transfer since launch replayed (a tx is a BUY when the pools' net balance drops, a SELL when it
+rises; tokens sent to the pool before the first buy = liquidity seeding) -> SUPPLY NOW; LINKED GROUPS (proven: same
+first funder, funder is another holder, shared funder 2 hops up, same bridge origin, same small signer bought for
+several wallets, tokens passed between them, many wallets sending their tokens to one COLLECTOR) with % held now and %
+ever taken in; POSSIBLE LINKS (same exchange/service wallet within 30 min, same block at launch, same relayer); TOP
+HOLDERS NOW; BIG BUYERS WHO LEFT (wallets that already dumped are invisible in a holder list — always read this
+section); COLLECTORS / DISTRIBUTORS; the wallets that fed a collector; the DEV.
+Traps: a first-tx signer with >= 10,000 txs is a relayer / trading-bot service (many unrelated users) -> only a
+possible link; exchange-funded wallets share a funder without being linked; fee-on-transfer / reflection tokens make
+amounts approximate (a note is printed). Speed: ~15-25 s cold for ~90 wallets on eth (funder lookups, Etherscan free
+3 calls/s), ~3 s when cached. NOT built yet: each wallet's past coins and how they ended; saved wallet profiles.
 
 ## Four questions (when the user asks "is it safe")
 1. Can the token hurt me? (mint, blacklist, pause, fees, proxy, hidden callers)
