@@ -18,7 +18,8 @@ SOLANA_ID = 792703809
 EXTRA_IDS = {1: "eth", 10: "op", 56: "bsc", 137: "polygon", 8453: "base", 42161: "arb", 43114: "avax", 999: "hyper",
              SOLANA_ID: "solana", 7565164: "solana", 324: "zksync", 59144: "linea", 81457: "blast", 534352: "scroll",
              130: "unichain", 2741: "abstract", 80094: "berachain", 146: "sonic", 1868: "soneium", 57073: "ink", 143: "monad",
-             99901: "elysium", 4326: "mega"}
+             99901: "elysium", 4326: "mega", 1337: "hyperliquid", 9745: "plasma", 8333: "bitcoin", 728126428: "tron",
+             9286185: "eclipse", 33139: "apechain", 2020: "ronin", 42220: "celo", 5000: "mantle", 34443: "mode", 7777777: "zora"}
 BORING = {"USDC", "USDT", "USDC.E", "USDBC", "DAI", "WETH", "ETH", "WBNB", "BNB", "WAVAX", "AVAX", "WHYPE", "HYPE", "WMON",
           "MON", "USDT0", "USD₮0", "BUSD", "FDUSD", "USDE", "WBTC", "CBBTC", "BTCB", "STETH", "WSTETH", "CBETH", "RETH",
           "USDG", "$USDG", "USGD", "PYUSD", "USD1", "RLUSD", "USDS", "SUSDE", "GHO", "LUSD", "FRAX", "EURC"}
@@ -94,7 +95,8 @@ async def _coins(ch, addrs, from_block, to_block):
 async def _bridges(addr):
     """Relay requests by user + Across deposits by depositor -> list of {time, src, dst, amount, symbol, usd, via}."""
     out = []
-    r, a, dl = await asyncio.gather(tget("https://api.relay.link/requests/v2", {"user": addr, "limit": 20}),
+    from lib.trace import relay_requests, relay_parse
+    r, a, dl = await asyncio.gather(relay_requests(user=addr, limit=20),
                                     tget("https://app.across.to/api/deposits", {"depositor": addr, "limit": 20}),
                                     tget("https://stats-api.dln.trade/api/Orders/filteredList", method="POST",
                                          body={"skip": 0, "take": 20, "filter": addr}))
@@ -109,21 +111,16 @@ async def _bridges(addr):
         out.append({"time": o.get("creationTimestamp"), "src": chain_name(cid(g)), "dst": chain_name(cid(t)),
                     "amount": f"{amt:.4g}" if amt is not None else None, "symbol": gm.get("symbol"),
                     "out_symbol": (t.get("metadata") or {}).get("symbol"), "usd": 0.0, "via": "deBridge"})
-    for x in (r or {}).get("requests") or []:
-        d = x.get("data") or {}
-        m = d.get("metadata") or {}
-        ci, co = m.get("currencyIn") or {}, m.get("currencyOut") or {}
-        src = (ci.get("currency") or {}).get("chainId") or ((d.get("inTxs") or [{}])[0].get("chainId"))
-        dst = (co.get("currency") or {}).get("chainId") or ((d.get("outTxs") or [{}])[0].get("chainId"))
+    for x in r or []:
         if x.get("status") != "success":
             continue
+        p = relay_parse(x)
         try:
-            ts = int(time.mktime(time.strptime(x["createdAt"][:19], "%Y-%m-%dT%H:%M:%S"))) - time.timezone
+            usd = float(p["usd"] or 0)
         except Exception:
-            ts = None
-        out.append({"time": ts, "src": chain_name(src), "dst": chain_name(dst), "amount": ci.get("amountFormatted"),
-                    "symbol": (ci.get("currency") or {}).get("symbol"), "out_symbol": (co.get("currency") or {}).get("symbol"),
-                    "usd": float(ci.get("amountUsd") or 0), "via": "Relay"})
+            usd = 0.0
+        out.append({"time": p["time"], "src": chain_name(p["src_chain"]), "dst": chain_name(p["dst_chain"]), "amount": p["amount"],
+                    "symbol": p["symbol"], "out_symbol": p["out_symbol"], "usd": usd, "via": "Relay"})
     from lib.trace import _decimals
     for x in a if isinstance(a, list) else []:
         if x.get("status") not in ("filled", None):
@@ -224,6 +221,14 @@ async def collect(home, addrs, now=None):
     return out, notes
 
 
+def _amt(a):
+    try:
+        v = float(a)
+    except Exception:
+        return a or ""
+    return f"{v:,.4g}" if v < 1e6 else f"{v:,.0f}"
+
+
 def _ago(s):
     return f"{s / 3600:.1f} h" if s < 172800 else f"{s / 86400:.0f} d"
 
@@ -264,9 +269,9 @@ def render(home, x, now):
         routes = Counter(f"{r['src']}→{r['dst']}" for r in b)
         last = b[0]
         vias = "/".join(sorted({r["via"] for r in b}))
-        L.append(f"     cross-chain swaps: {len(b)} ({vias}) " + (f"· ${tot:,.0f} moved " if tot else "") + "· routes: "
+        L.append(f"     cross-chain swaps: {len(b)} ({vias}) " + (f"· ${tot:,.0f} moved where priced " if tot else "") + "· routes: "
                  + ", ".join(f"{k} ×{v}" for k, v in routes.most_common(4))
-                 + f" · last: {last['src']}→{last['dst']} {last['amount'] or ''} {last['symbol'] or ''}".rstrip()
+                 + f" · last: {last['src']}→{last['dst']} {_amt(last['amount'])} {last['symbol'] or ''}".rstrip()
                  + (f" (${last['usd']:,.0f})" if last["usd"] else "")
                  + (f", {_ago(now - last['time'])} ago" if last.get("time") else "") + tail)
     elif read:

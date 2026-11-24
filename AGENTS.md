@@ -125,8 +125,9 @@ CROSS-CHAIN (lib/xchain.py, inside the profiles): tx counts now / 30 d / 7 d on 
 past blocks, one batch per chain) and "MAINLY ACTIVE ON <chain>"; coins traded in the last 7 d on each other chain
 (one multi-wallet Transfer log scan per chain + direction; airdrops dropped = received by >= 4 profiled wallets and sent
 by none, or never moved with no live pool; mcap > 1000x liquidity shown as "thin pool"); cross-chain swaps from Across
-(by depositor) and deBridge (filteredList filter=<address>). RELAY: /requests/v2 was retired 2026-11-24 and v3 needs an
-x-api-key -> Relay bridges are NOT read (also lib/trace.relay_fill, the dev money trail) until the user adds a key.
+(by depositor) and deBridge (filteredList filter=<address>). RELAY: /requests/v2 was retired 2026-11-24; lib/trace uses
+/requests/v3 with the x-api-key in keys/relay (relay_requests / relay_parse): by user for holder profiles, by
+fillTxHash for bridge-payout matching in money trails. No key -> Relay is reported as not read.
 ANSWER FORMAT (user rules): wallets only, no safety lines; EVERY wallet is a clickable explorer link; overview of the
 current situation first, then a section per top wallet; deep, not a summary table.
 

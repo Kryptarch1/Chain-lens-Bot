@@ -8,30 +8,58 @@ import aiohttp
 from lib.rpc import RPC, CHAINS
 from lib import explorer
 
-RELAY = "https://api.relay.link/requests/v2"
+RELAY = "https://api.relay.link/requests/v3"  # v2 retired 2026-11-24; v3 needs x-api-key (keys/relay)
 EXCHANGE_NONCE = 10_000           # wallets with this many txs are exchanges / services / bots
 CHAIN_BY_ID = {v["id"]: k for k, v in CHAINS.items()}
 SOLANA_ID = 792703809
 
 
-async def relay_fill(tx_hash):
-    """If tx_hash is a Relay payout, return the origin {chain_id, sender, amount, symbol, usd, in_tx}."""
+def _relay_key():
+    import os
+    from lib.rpc import ROOT
+    f = os.path.join(ROOT, "keys", "relay")
+    return open(f).read().strip() if os.path.exists(f) else ""
+
+
+async def relay_requests(**params):
+    """GET /requests/v3 (needs the API key in keys/relay). -> list of requests, or None if unreadable."""
+    key = _relay_key()
+    if not key:
+        return None
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s:
-            async with s.get(RELAY, params={"hash": tx_hash, "limit": 1}) as r:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10), headers={"x-api-key": key, "User-Agent": "dd-bot/1.0"}) as s:
+            async with s.get(RELAY, params=params) as r:
+                if r.status != 200:
+                    return None
                 d = await r.json(content_type=None)
     except Exception:
         return None
-    rs = d.get("requests") or []
+    return d.get("requests") or []
+
+
+def relay_parse(r):
+    """v3 request -> {src_chain, dst_chain, amount, symbol, usd, out_symbol, in_tx, out_tx, time, user}"""
+    d = r.get("data") or {}
+    q = ((d.get("route") or {}).get("quoted")) or {}
+    ci = ((q.get("origin") or {}).get("inputCurrency")) or {}
+    co = ((q.get("destination") or {}).get("outputCurrency")) or {}
+    ins, outs = d.get("inTxs") or [], d.get("outTxs") or []
+    return {"src_chain": (ci.get("currency") or {}).get("chainId") or (ins[0].get("chainId") if ins else None),
+            "dst_chain": (co.get("currency") or {}).get("chainId") or (outs[0].get("chainId") if outs else None),
+            "amount": ci.get("amountFormatted"), "symbol": (ci.get("currency") or {}).get("symbol"), "usd": ci.get("amountUsd"),
+            "out_symbol": (co.get("currency") or {}).get("symbol"), "in_tx": ins[0].get("txHash") if ins else None,
+            "out_tx": outs[0].get("txHash") if outs else None, "time": ins[0].get("timestamp") if ins else None,
+            "user": r.get("user"), "status": r.get("status")}
+
+
+async def relay_fill(tx_hash):
+    """If tx_hash is a Relay payout, return the origin {chain_id, sender, amount, symbol, usd, in_tx}."""
+    rs = await relay_requests(fillTxHash=tx_hash, limit=1)
     if not rs:
         return None
-    r = rs[0]
-    m = (r.get("data") or {}).get("metadata") or {}
-    ci = m.get("currencyIn") or {}
-    ins = (r.get("data") or {}).get("inTxs") or []
-    return {"chain_id": (ci.get("currency") or {}).get("chainId"), "sender": r.get("user"),
-            "amount": ci.get("amountFormatted"), "symbol": (ci.get("currency") or {}).get("symbol"),
-            "usd": ci.get("amountUsd"), "in_tx": ins[0].get("hash") if ins else None, "time": r.get("createdAt")}
+    x = relay_parse(rs[0])
+    return {"chain_id": x["src_chain"], "sender": x["user"], "amount": x["amount"], "symbol": x["symbol"],
+            "usd": x["usd"], "in_tx": x["in_tx"], "time": x["time"]}
 
 
 ACROSS = "https://app.across.to/api/deposits"
