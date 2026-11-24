@@ -24,10 +24,12 @@ STABLES = {  # chain -> {token: (symbol, decimals)}
     "base": {"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": ("USDC", 6)},
     "arb": {"0xaf88d065e77c8cc2239327c5edb3a432268e5831": ("USDC", 6), "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9": ("USDT", 6)},
     "bsc": {"0x55d398326f99059ff775485246999027b3197955": ("USDT", 18), "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d": ("USDC", 18)},
+    "avax": {"0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e": ("USDC", 6), "0x9702230a8ea53601f5cd2dc00fdbc13d4df4a8c7": ("USDT", 6)},
 }
 WRAPPED = {"eth": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", "base": "0x4200000000000000000000000000000000000006",
-           "arb": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1", "bsc": "0xbb4cdb9cbd36b01bd1cbaead2de08d9173bc095c"}
-WEALTH_CHAINS = ("eth", "base", "arb", "bsc")
+           "arb": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1", "bsc": "0xbb4cdb9cbd36b01bd1cbaead2de08d9173bc095c",
+           "avax": "0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7"}
+WEALTH_CHAINS = ("eth", "base", "arb", "bsc", "avax")
 KNOWN = {  # well-known contracts (names the explorer would also give, saved a call)
     "0x7a250d5630b4cf539739df2c5dacb4c659f2488d": "Uniswap V2 Router", "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad": "Uniswap Universal Router",
     "0x66a9893cc07d91d95644aedd05d03f95e1dba8af": "Uniswap Universal Router (v4)", "0xe592427a0aece92de3edee1f18e0157c05861564": "Uniswap V3 Router",
@@ -143,6 +145,14 @@ async def profile_all(chain, d, n=20):
                 notes.append(f"history of {a} not read ({type(e).__name__})")
                 return [], []
     prices_task = asyncio.create_task(_prices())
+    from lib import xchain
+
+    async def xc():
+        try:
+            return await asyncio.wait_for(xchain.collect(chain, addrs, d["now"]), 150)
+        except Exception as e:
+            return {}, [f"cross-chain activity failed ({type(e).__name__})"]
+    xc_task = asyncio.create_task(xc())
     hs = await asyncio.gather(*[hist(a) for a in addrs])
     prices = await prices_task
     eth_usd = prices.get(chain) or prices.get("eth") or 0
@@ -230,6 +240,8 @@ async def profile_all(chain, d, n=20):
             names[c] = None
     await asyncio.gather(*[nm(c) for c in to_name[:25]])
     wealth = await wealth_task
+    xc_res, xc_notes = await xc_task
+    notes += xc_notes
 
     # ---- assemble
     supply = d["supply"] / 10 ** d["decimals"]
@@ -288,6 +300,7 @@ async def profile_all(chain, d, n=20):
             "holdings": sorted(held[a], reverse=True)[:8], "holdings_usd": sum(u for u, _, _ in held[a]),
             "wealth": wealth.get(a, {}), "eth_usd": eth_usd,
             "protocols": [(c, names.get(c) or None, k) for c, k in prot.most_common(5)],
+            "xchain": xc_res.get(a),
         }
     notes.append(f"profiles: {len(targets)} wallets, history = newest 300 txs + 1000 token transfers each ({time.time() - t0:.1f}s)")
     return notes
@@ -354,4 +367,6 @@ def render(d, h):
         L.append("     money: " + " · ".join(m))
     if p["protocols"]:
         L.append("     uses: " + ", ".join(f"{n or c[:10] + '…'} ({k})" for c, n, k in p["protocols"]))
+    from lib import xchain
+    L += xchain.render(d["chain"], p.get("xchain"), now)
     return L

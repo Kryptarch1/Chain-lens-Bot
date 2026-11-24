@@ -121,6 +121,12 @@ signed or later sent out) with today's state, early entries (< 1 h after the poo
 >= $50k liquidity), wealth across eth/base/arb/bsc (native + stables), holdings of coins it traded (capped at pool
 liquidity; airdropped spam ignored), stablecoin moves >= $5k, contracts it calls most. Each profile = newest 300 txs +
 1000 token transfers, so "past coins" covers a window (printed), not the whole life of a busy wallet.
+CROSS-CHAIN (lib/xchain.py, inside the profiles): tx counts now / 30 d / 7 d on every chain with a private node (nonce at
+past blocks, one batch per chain) and "MAINLY ACTIVE ON <chain>"; coins traded in the last 7 d on each other chain
+(one multi-wallet Transfer log scan per chain + direction; airdrops dropped = received by >= 4 profiled wallets and sent
+by none, or never moved with no live pool; mcap > 1000x liquidity shown as "thin pool"); cross-chain swaps from Across
+(by depositor) and deBridge (filteredList filter=<address>). RELAY: /requests/v2 was retired 2026-11-24 and v3 needs an
+x-api-key -> Relay bridges are NOT read (also lib/trace.relay_fill, the dev money trail) until the user adds a key.
 ANSWER FORMAT (user rules): wallets only, no safety lines; EVERY wallet is a clickable explorer link; overview of the
 current situation first, then a section per top wallet; deep, not a summary table.
 
