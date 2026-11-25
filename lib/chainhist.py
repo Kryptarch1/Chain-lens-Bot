@@ -108,9 +108,9 @@ async def collect(pairs, now, prices):
                 state = "no pool" if not i_ else ("dead" if (i_.get("liq") or 0) < 1000 else "alive")
                 early = bool(i_.get("created") and k["first"] - i_["created"] <= 3600)
                 coins.append({"token": c, "first_tx": k.get("first_tx"), "name": i_.get("name"), "symbol": i_.get("symbol") or k["symbol"] or "?", "first": k["first"], "state": state, "early": early,
-                              "mcap": i_.get("mcap"), "liq": i_.get("liq"), "sold": k["out"]})
+                              "mcap": i_.get("mcap"), "liq": i_.get("liq"), "sold": k["out"], "rwa": bool(i_.get("rwa"))})
             coins.sort(key=lambda x: -(x["first"] or 0))
-            win = [x for x in coins if x["early"] and x["state"] == "alive" and (x["mcap"] or 0) >= 1_000_000
+            win = [x for x in coins if x["early"] and x["state"] == "alive" and not x["rwa"] and (x["mcap"] or 0) >= 1_000_000
                    and (x["liq"] or 0) >= 50_000 and (x["mcap"] or 0) <= (x["liq"] or 0) * 500]
             swaps = [int(x.get("value") or 0) / 1e18 for x in tl if (x.get("from") or "").lower() == a
                      and int(x.get("value") or 0) > 0 and (x.get("input") or "0x") != "0x"]

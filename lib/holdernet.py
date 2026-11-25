@@ -205,22 +205,11 @@ async def scan(chain, d, wallets, timing=None):
         return (tight[p] >= 3 and tight[p] >= 0.1 * m) or (tog[p] >= 3 and tog[p] >= 0.25 * m) \
             or (tog[p] >= 2 and m <= QUIET)
     strong = [p for p in shared if is_strong(p)]
-    par = {}
-
-    def f(x):
-        par.setdefault(x, x)
-        while par[x] != x:
-            par[x] = par[par[x]]
-            x = par[x]
-        return x
-    for a, b in strong:
-        par[f(a)] = f(b)
-    groups = defaultdict(list)
-    for a in {x for p in strong for x in p}:
-        groups[f(a)].append(a)
+    from lib.wprofile import tight_groups
+    groups = tight_groups(strong, lambda p: (tight[p], tog[p], shared[p]))
     pct = {h["addr"]: h.get("pct") or 0 for h in wallets}
     clusters = []
-    for g in groups.values():
+    for g in groups:
         g.sort(key=lambda a: -pct.get(a, 0))
         prs = sorted([p for p in strong if p[0] in g and p[1] in g], key=lambda p: (-tight[p], -tog[p], -shared[p]))
         clusters.append({"who": g, "pct": sum(pct.get(a, 0) for a in g),

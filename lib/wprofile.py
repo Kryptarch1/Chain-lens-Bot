@@ -12,7 +12,7 @@ Per wallet, from its own history (Etherscan txlist + tokentx, cached) and live r
   protocols  the contracts it calls most, named from verified source
 Everything is a fact read from the chain or the explorer; labels are added by the analyst, not here.
 """
-import asyncio, statistics, time
+import asyncio, re, statistics, time
 from collections import Counter, defaultdict
 from lib.rpc import RPC
 from lib.evm import encode_call, decode1
@@ -43,12 +43,47 @@ KNOWN = {  # well-known contracts (names the explorer would also give, saved a c
 }
 
 
+# Tokenized stocks / funds (NVDAB, TSLAB, ANTc, SPCXon, FXIon...) are priced like the real asset: a wallet buying one
+# in its first hour is not a gem call. Two generic tells, no coin list: a legal-entity / fund name, or a stock-like unit
+# price with a tiny supply (memecoins launch at fractions of a cent with 100M+ supply).
+_RWA_NAME = re.compile(r"(\b(inc|corp|corporation|pbc|ltd|plc|llc|etf|trust|fund|holdings)\b\.?\s*$|tokeni[sz]ed|xstock|\bondo\b)", re.I)
+
+
+def is_rwa(i):
+    name = (i.get("name") or "").strip().rstrip(")").strip()
+    if _RWA_NAME.search(name) or _RWA_NAME.search(i.get("name") or ""):
+        return True
+    price, mcap = i.get("price") or 0, i.get("mcap") or 0
+    return price >= 20 and mcap and mcap / price < 10_000_000
+
+
+def tight_groups(pairs, score):
+    """Groups in which EVERY two members are a strong pair (complete linkage), strongest pairs first. Union-find chained
+    a whole trench crowd through one weak link each (19 wallets on CLNS, base): A~B and B~C does not make A~C."""
+    ok = set(pairs) | {(b, a) for a, b in pairs}
+    gid, groups = {}, []
+    for a, b in sorted(pairs, key=score, reverse=True):
+        ga, gb = gid.get(a), gid.get(b)
+        if ga is None and gb is None:
+            groups.append([a, b]); gid[a] = gid[b] = len(groups) - 1
+        elif ga is not None and gb is not None:
+            if ga != gb and all((x, y) in ok for x in groups[ga] for y in groups[gb]):
+                for x in groups[gb]:
+                    gid[x] = ga
+                groups[ga] += groups[gb]; groups[gb] = []
+        else:
+            g, x = (ga, b) if ga is not None else (gb, a)
+            if all((x, y) in ok for y in groups[g]):
+                groups[g].append(x); gid[x] = g
+    return [g for g in groups if g]
+
+
 async def _ds_tokens(chain, tokens):
     """DexScreener: token -> best pair (by liquidity) {'symbol','price','liq','mcap','created'}. Cached 10 min."""
     ds = explorer.CHAINS.get(chain, {}).get("dexscreener") or chain
     out, todo = {}, []
     for t in tokens:
-        c = cache.get(f"ds:{chain}:{t}")
+        c = cache.get(f"ds2:{chain}:{t}")
         if c is not None:
             out[t] = c
         else:
@@ -58,7 +93,7 @@ async def _ds_tokens(chain, tokens):
         d = await explorer._get(f"https://api.dexscreener.com/tokens/v1/{ds}/{','.join(chunk)}", timeout=20)
         return d if isinstance(d, list) else []
     res = await asyncio.gather(*[one(todo[i:i + 30]) for i in range(0, len(todo), 30)])
-    best = {}
+    best, first = {}, {}
     for pairs in res:
         for p in pairs:
             t = ((p.get("baseToken") or {}).get("address") or "").lower()
@@ -66,10 +101,19 @@ async def _ds_tokens(chain, tokens):
             if t and (t not in best or liq > best[t]["liq"]):
                 best[t] = {"symbol": (p.get("baseToken") or {}).get("symbol"), "name": (p.get("baseToken") or {}).get("name"), "price": float(p.get("priceUsd") or 0), "liq": liq,
                            "mcap": p.get("marketCap") or p.get("fdv"), "created": (p.get("pairCreatedAt") or 0) // 1000 or None}
+            # the coin's age = its FIRST pool, not its deepest one: a new v4 pool on an old coin (APE on eth) made a
+            # buy look 'within 1 h of launch'
+            ts = (p.get("pairCreatedAt") or 0) // 1000
+            if t and ts:
+                first[t] = min(first.get(t) or ts, ts)
+    for t, v in best.items():
+        if first.get(t):
+            v["created"] = first[t]
+        v["rwa"] = is_rwa(v)
     for t in todo:
         v = best.get(t, {})
         out[t] = v
-        cache.set(f"ds:{chain}:{t}", v, ttl=600)
+        cache.set(f"ds2:{chain}:{t}", v, ttl=600)
     return out
 
 
@@ -373,11 +417,11 @@ async def profile_all(chain, d, n=20):
             early = bool(i.get("created") and k["first"] and k["first"] - i["created"] <= 3600)
             state = "no pool" if not i else ("dead" if (i.get("liq") or 0) < 1000 else "alive")
             coins.append({"token": c, "name": i.get("name"), "symbol": i.get("symbol") or k["symbol"], "first": k["first"], "first_tx": k.get("first_tx"), "state": state,
-                          "mcap": i.get("mcap"), "liq": i.get("liq"), "early": early})
+                          "mcap": i.get("mcap"), "liq": i.get("liq"), "early": early, "rwa": bool(i.get("rwa"))})
         coins.sort(key=lambda x: -(x["first"] or 0))
         now = d["now"]
         win = [x for x in coins if x["state"] == "alive" and (x["mcap"] or 0) >= 1_000_000 and (x["liq"] or 0) >= 50_000
-               and (x["mcap"] or 0) <= (x["liq"] or 0) * 500]
+               and (x["mcap"] or 0) <= (x["liq"] or 0) * 500 and not x["rwa"]]
         prot = Counter((x.get("to") or "").lower() for x in own_tx if (x.get("input") or "0x") != "0x" and x.get("to"))
         h["profile"] = {
             "txs_read": len(tl), "tokentx_read": p["tt_n"], "history_from": p["tt_oldest"],
@@ -631,20 +675,10 @@ async def shared_coins(d, targets):
             or (tog[a, b] >= 2 and m <= 10)
     strong = [(a, b) for (a, b) in shared if is_strong(a, b)]
     crowd = sum(1 for n in shared.values() if n >= 5)
-    par = {}
-    def f(x):
-        par.setdefault(x, x)
-        while par[x] != x:
-            par[x] = par[par[x]]; x = par[x]
-        return x
-    for a, b in strong:
-        par[f(a)] = f(b)
-    groups = defaultdict(list)
-    for a in {x for pr in strong for x in pr}:
-        groups[f(a)].append(a)
+    groups = tight_groups(strong, lambda p: (tight[p], tog[p], shared[p]))
     pct = {h["addr"]: h.get("pct") or 0 for h in hs}
     clusters = []
-    for g in groups.values():
+    for g in groups:
         g.sort(key=lambda a: rank[a])
         prs = [(a, b) for a, b in strong if a in g and b in g]
         clusters.append({"who": g, "ranks": [rank[a] + 1 for a in g], "pct": sum(pct[a] for a in g),
