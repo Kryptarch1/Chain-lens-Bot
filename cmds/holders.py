@@ -1,13 +1,32 @@
-"""dd holders <chain> <token> [--top N] [--fast = no wallet profiles] [--json] — who holds the token, how they got it, how the wallets are linked."""
-import json, os, sys
+"""dd holders <chain> <token> [--top N] [--fast = quick pass only] [--json] — who holds the token, how they got it, how the
+wallets are linked. Prints a QUICK PASS first (~10 s: holders, links, big buyers who left, dev), then the DEEP PROFILES."""
+import json, os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib.rpc import run
 from lib import holders
 
 
 async def main(chain, token, top, as_json):
-    d = await holders.collect(chain, token, top=top, profile=0 if '--fast' in sys.argv else 20)
-    print(json.dumps(d, indent=1, default=str) if as_json else holders.render(d))
+    fast = "--fast" in sys.argv
+    if as_json:
+        d = await holders.collect(chain, token, top=top, profile=0 if fast else 20)
+        print(json.dumps(d, indent=1, default=str))
+        return
+    d = await holders.collect(chain, token, top=top, profile=0)
+    if d.get("error"):
+        print(d["error"])
+        return
+    print("== QUICK PASS" + ("" if fast else " (deep profiles follow)"))
+    print(holders.render(d), flush=True)
+    if fast:
+        return
+    from lib import wprofile
+    t = time.time()
+    try:
+        notes = await __import__("asyncio").wait_for(wprofile.profile_all(chain, d, n=20), 240)
+    except Exception as e:
+        notes = [f"wallet profiles failed ({type(e).__name__}: {str(e)[:80]})"]
+    print(holders.render_deep(d, notes, time.time() - t), flush=True)
 
 
 if __name__ == "__main__":

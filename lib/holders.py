@@ -253,12 +253,49 @@ async def collect(chain, token, top=25, profile=20):
         except Exception as e:
             return {"error": type(e).__name__}
 
+    async def funded_all():
+        return await funded_many(W)
+
+    async def funded_many(W):
+        # the explorer can't list wallets on this chain (BSC/Base/RH free key) and HyperSync's free plan runs out:
+        # binary-search our own archive node instead (lib/nodefund), explorer path only for what that misses
+        if not (rpc.private and ex.es_id in explorer.FREE_UNSUPPORTED):
+            return await asyncio.gather(*[funded(a) for a in W])
+        from lib import cache, nodefund
+        res, miss = {}, []
+        for a in W:
+            c = cache.get(f"funded:{chain}:{a}")
+            if c is not None:
+                res[a] = c
+            else:
+                miss.append(a)
+        if miss:
+            r0 = await rpc.batch([("eth_getTransactionCount", [a, hex(latest)]) for a in miss] + [("eth_getBalance", [a, hex(latest)]) for a in miss])
+            n = len(miss)
+            nn = {a: int(r0[i], 16) if r0[i] else 0 for i, a in enumerate(miss)}
+            bb = {a: int(r0[n + i], 16) if r0[n + i] else 0 for i, a in enumerate(miss)}
+            try:
+                nf = await asyncio.wait_for(nodefund.first_funding_many(chain, miss, nn, bb, latest), 90)
+            except Exception as e:
+                nf = {a: {"error": type(e).__name__} for a in miss}
+            for a in miss:
+                x = nf.get(a) or {"error": "missing"}
+                if x.get("from"):
+                    res[a] = {k: x[k] for k in ("from", "tx", "time", "internal") if k in x}
+                    cache.set(f"funded:{chain}:{a}", res[a], ttl=None)
+                elif x.get("none"):
+                    res[a] = {}
+                    cache.set(f"funded:{chain}:{a}", {}, ttl=600)
+                else:
+                    res[a] = {"error": "node: " + str(x.get("error"))}
+        return [res[a] for a in W]
+
     t = time.time()
     txr, blr, nb, fund = await asyncio.gather(
         rpc.batch([("eth_getTransactionByHash", [h]) for h in first_txs]),
         rpc.batch([("eth_getBlockByNumber", [hex(b), False]) for b in blocks]),
         rpc.batch([("eth_getTransactionCount", [a, "latest"]) for a in W] + [("eth_getBalance", [a, "latest"]) for a in W]),
-        asyncio.gather(*[funded(a) for a in W]))
+        funded_all())
     timing["wallets"] = time.time() - t
     txd = {h: x for h, x in zip(first_txs, txr) if x}
     bts = {b: int(x["timestamp"], 16) for b, x in zip(blocks, blr) if x}
@@ -298,7 +335,13 @@ async def collect(chain, token, top=25, profile=20):
     shared = Counter(h["funder"] for h in wallets if h["funder"])
     svc_check = [f for f in F if fk[f]["kind"] == "wallet" and (fk[f]["nonce"] >= 1000 or shared[f] >= 2)]
 
+    node_only = bool(rpc.private and ex.es_id in explorer.FREE_UNSUPPORTED)
+
     async def payout_service(f):
+        if node_only:
+            # can't list its txs here without HyperSync: a busy funder is treated as a service (sharing it is not proof)
+            return f"busy wallet ({fk[f]['nonce']:,} txs; its payouts can't be listed on this chain's free explorer), treated as a service" \
+                if fk[f]["nonce"] >= 1000 else None
         try:
             tl = await asyncio.wait_for(ex.txlist(f, limit=200), 40)
         except Exception:
@@ -320,6 +363,10 @@ async def collect(chain, token, top=25, profile=20):
         fx = ftx.get(h.get("fund_tx"))
         h["fund_amt"] = int(fx["value"], 16) / 1e18 if fx else None
         h["fund_block"] = int(fx["blockNumber"], 16) if fx else None
+        if h["fund_amt"] is not None and h["fund_amt"] < 1e-6:
+            # dust 'activation' sends (1e-18 BNB from an app's service wallet) are markers, not funding or wallet age
+            h["fund_marker"] = h["funder"]
+            h["funder"] = h["fund_tx"] = h["fund_ts"] = h["fund_block"] = None
     hop2 = [f for f in F if fk[f]["kind"] == "wallet" and f not in W]
     sem = asyncio.Semaphore(6)
 
@@ -331,7 +378,14 @@ async def collect(chain, token, top=25, profile=20):
                 return None
 
     maybe_bridge = [h for h in wallets if h["funder"] and h["fund_tx"] and fk[h["funder"]]["kind"] != "wallet"]
-    h2, br = await asyncio.gather(asyncio.gather(*[funded(f) for f in hop2]), asyncio.gather(*[bridge(h) for h in maybe_bridge]))
+    timing["funders: services+amounts"] = time.time() - t
+    t2 = time.time()
+
+    async def _tm(k, co):
+        r = await co
+        timing[k] = time.time() - t2
+        return r
+    h2, br = await asyncio.gather(_tm("funders: 2nd hop", funded_many(hop2)), _tm("funders: bridges", asyncio.gather(*[bridge(h) for h in maybe_bridge])))
     for f, r in zip(hop2, h2):
         fk[f]["funder"] = ((r or {}).get("from") or "").lower() or None
     G = sorted({v["funder"] for v in fk.values() if v.get("funder")} - set(fk))
@@ -660,4 +714,24 @@ def render(d):
             L.append(f"   - funder not found for {len(miss)} wallet(s): " + "; ".join(f"{k} ×{v}" for k, v in why.most_common())
                      + " — " + ", ".join(n.split()[2] for n in miss[:40]))
     L.append(f"   ({d['secs']}s: " + ", ".join(f"{k} {v}s" for k, v in d["timing"].items()) + ")")
+    return "\n".join(L)
+
+
+def render_deep(d, notes, secs):
+    """Second part of `dd holders` (after the quick pass): shared coins/clusters + each profiled wallet's deep profile."""
+    from lib import wprofile
+    L = ["", "== DEEP PROFILES (history, cross-chain, shared coins)"]
+    L += wprofile.render_shared(d)
+    n = 0
+    for h in d["wallets"]:
+        if not h.get("profile"):
+            continue
+        n += 1
+        tag = f"#{[w for w in d['wallets'] if 'holder' in w['roles']].index(h) + 1} " if "holder" in h["roles"] else "[DEV] "
+        L.append(f" {tag}{h['addr']}  now {h['pct']:.2f}% · got {h['got_pct']:.2f}% in total")
+        L += wprofile.render(d, h)
+    if notes:
+        L.append("NOT CHECKED / NOTES (profiles)")
+        L += [f"   - {x}" for x in notes[:25]]
+    L.append(f"   (deep profiles: {n} wallets, {secs:.1f}s)")
     return "\n".join(L)

@@ -58,7 +58,7 @@ owner-only functions and says "ask for dd sim to confirm".
 | Deep check (stateful sell tests: delayed honeypot, sell caps, funds taken) — ONLY when asked | `dd check <chain> <token> --deep` or `dd sell <chain> <token>` |
 | What does this ONE function really do (read the code) | `dd code <chain> <address> <function>` (name, signature or selector; `--from 0x..` `--args a,b` to choose caller/args; works on proxies and hooks) |
 | Where did a wallet's money come from | `dd trace <chain> <wallet>` |
-| Who holds it / wallet analysis / bundles / "analyse the holders" | `dd holders <chain> <token>` (`--top N`, `--json`) — then write the deep analysis yourself (see HOLDERS below) |
+| Who holds it / wallet analysis / bundles / "analyse the holders" | `dd holders <chain> <token>` (quick pass then deep profiles; `--fast` quick only, `--top N`, `--json`) — then write the deep analysis yourself (see HOLDERS below) |
 | Anything else (old toolkit) | `dd <chain> token|audit|cast|rpc|fork|wallet` |
 
 `dd check` covers: functions (bytecode → names → risky/unknown), who can call each privileged function
@@ -146,6 +146,13 @@ traded, ranked: similar name to this token first, big popular coins (>= $20M) la
 within 10 min. CLUSTER = holder pairs that bought >= 2 of the same SMALL coins within 10 min of each other (union of such
 pairs; strongest pairs listed first) -> one person / copy-trader / calling group, not proof. Airdrops are dropped by 'one tx
 reached 3+ wallets'. Busy BSC degens share many trending coins: plain overlap alone is crowd behaviour.
+SPEED (2026-11-25): `dd holders` prints a QUICK PASS first (~7-12 s: supply, links, possible links, top holders, big buyers
+who left, dev) and then DEEP PROFILES (~25-35 s more: shared coins/clusters + each wallet's profile); `--fast` = quick pass only.
+Answer the user from the quick pass right away when they are waiting, then follow up with the deep part. Other-chain history
+starts as soon as tx counts are in. FUNDERS where the explorer can't list wallets (bsc/base/rh free key): lib/nodefund.py
+binary-searches our archive node (first nonce > 0, then first balance > dust before it; the tx from the block, or the block's
+call trace for contract payouts) -> no HyperSync, results cached forever; busy funders (>= 1,000 txs) there are treated as
+services (their payouts can't be listed). Fundings < 1e-6 native are app 'activation' markers and are ignored.
 ANSWER FORMAT (user rules): wallets only, no safety lines; EVERY wallet is a clickable explorer link; overview of the
 verdict on the holder base first, then ONLY high-impact findings (clusters, smart money vs bots, sellers, wallets to
 watch) one line each; NO buy mechanics (relayer, position, routers, tx counts, dust funding) unless it changes the conclusion.

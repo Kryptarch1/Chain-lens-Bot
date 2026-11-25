@@ -157,6 +157,26 @@ async def profile_all(chain, d, n=20):
     xc_task = asyncio.create_task(xc())
     from lib import chainhist
 
+    async def other_hist():
+        """Other-chain history starts as soon as the cheap tx counts are in (not after the slow 7-day coin scans and
+        bridge lookups): the wallet's top 4 other chains by recent activity."""
+        chains = [c for c in xchain.private_chains() if c != chain]
+        res = await asyncio.gather(*[asyncio.wait_for(xchain._activity(c, addrs, d["now"]), 30) for c in chains], return_exceptions=True)
+        pairs = []
+        for a in addrs:
+            cand = {}
+            for c, r in zip(chains, res):
+                if isinstance(r, Exception) or not r:
+                    continue
+                v = r[0].get(a) or {}
+                if (v.get("d90") or 0) > 0 or (v.get("total") or 0) >= 20:
+                    cand[c] = (v.get("d30") or 0) + (v.get("total") or 0) / 1000
+            pairs += [(a, c) for c, _ in sorted(cand.items(), key=lambda kv: -kv[1])[:4]]
+        if not pairs:
+            return {}
+        return await asyncio.wait_for(chainhist.collect(pairs, d["now"], await prices_task), 150)
+    oh_task = asyncio.create_task(other_hist())
+
     busy = set()
 
     async def home_fb():
@@ -293,24 +313,13 @@ async def profile_all(chain, d, n=20):
     xc_res, xc_notes = await xc_task
     tm["cross-chain"] = time.time() - t0
     notes += xc_notes
-    # full history on each other chain the wallet is active on (top 4 by recent activity / coins)
-    pairs = []
-    for a in addrs:
-        x = (xc_res or {}).get(a) or {}
-        cand = {}
-        for ch, v in (x.get("chains") or {}).items():
-            if ch != chain and ((v.get("d90") or 0) > 0 or v.get("total", 0) >= 20):
-                cand[ch] = (v.get("d30") or 0) + (v.get("total") or 0) / 1000
-        for ch, rows in (x.get("coins") or {}).items():
-            if ch != chain:
-                cand[ch] = cand.get(ch, 0) + len(rows)
-        pairs += [(a, ch) for ch, _ in sorted(cand.items(), key=lambda kv: -kv[1])[:4]]
+    # full history on each other chain the wallet is active on (started early, see other_hist)
     ch_hist = {}
-    if pairs:
-        try:
-            ch_hist = await asyncio.wait_for(chainhist.collect(pairs, d["now"], prices), 150)
-        except Exception as e:
-            notes.append(f"other-chain history failed ({type(e).__name__})")
+    try:
+        ch_hist = await oh_task
+    except Exception as e:
+        notes.append(f"other-chain history failed ({type(e).__name__})")
+    if ch_hist:
         unread = sorted({ch for a in ch_hist for ch, v in ch_hist[a].items() if "free Etherscan" in (v.get("error") or "")})
         if unread:
             notes.append(f"other-chain history NOT readable on {', '.join(unread)} with the free Etherscan key (Etherscan Lite covers them)")
