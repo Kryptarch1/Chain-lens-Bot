@@ -153,6 +153,11 @@ starts as soon as tx counts are in. FUNDERS where the explorer can't list wallet
 binary-searches our archive node (first nonce > 0, then first balance > dust before it; the tx from the block, or the block's
 call trace for contract payouts) -> no HyperSync, results cached forever; busy funders (>= 1,000 txs) there are treated as
 services (their payouts can't be listed). Fundings < 1e-6 native are app 'activation' markers and are ignored.
+REAL-BUY CHECK (wprofile._is_buy / _real_buys, 2026-11-25): disperse bots spray fake coins to hundreds of wallets per tx
+(mihao/FLOAT on BSC: 317 recipients in one tx), which looked like 'shared coins bought together'. A wallet+coin counts only
+if its first tx of that coin shows the wallet PAYING: a V2/V3/PancakeV3/V4 Swap or WBNB/WETH Deposit in the receipt, another
+token sent out by the wallet, or a launchpad curve (Flap portal, four.meme) in the tx. Applied to shared coins/clusters (all
+chains) and to the 30-day BSC/Base/RH log coins (76% were spray on 莫达). Known real buys of the token itself all pass.
 USER RULE (2026-11-25): every point must be (1) non-obvious (not what GMGN's holder tab shows), (2) backed by specific evidence,
 (3) say what it means for the trade. Model = hidden pairs among current holders as one combined holder (% now, evidence,
 PROVEN vs copy-trade). Generic lines (dev sold, snipers exited, 'a crowd', 'mid quality') without a consequence = fluff.

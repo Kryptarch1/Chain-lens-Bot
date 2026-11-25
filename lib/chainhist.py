@@ -65,7 +65,8 @@ async def collect(pairs, now, prices):
                     continue
                 k = coins.setdefault(c, {"symbol": x.get("tokenSymbol"), "first": None, "own": False, "out": False})
                 if (x.get("to") or "").lower() == a:
-                    k["first"] = k["first"] or _ts(x.get("timeStamp"))
+                    if not k["first"]:
+                        k["first"], k["first_tx"] = _ts(x.get("timeStamp")), x.get("hash")
                     k["own"] = k["own"] or x.get("hash") in own
                 elif (x.get("from") or "").lower() == a:
                     k["out"] = True
@@ -105,7 +106,7 @@ async def collect(pairs, now, prices):
                 i_ = info.get(c) or {}
                 state = "no pool" if not i_ else ("dead" if (i_.get("liq") or 0) < 1000 else "alive")
                 early = bool(i_.get("created") and k["first"] - i_["created"] <= 3600)
-                coins.append({"token": c, "name": i_.get("name"), "symbol": i_.get("symbol") or k["symbol"] or "?", "first": k["first"], "state": state, "early": early,
+                coins.append({"token": c, "first_tx": k.get("first_tx"), "name": i_.get("name"), "symbol": i_.get("symbol") or k["symbol"] or "?", "first": k["first"], "state": state, "early": early,
                               "mcap": i_.get("mcap"), "liq": i_.get("liq"), "sold": k["out"]})
             coins.sort(key=lambda x: -(x["first"] or 0))
             win = [x for x in coins if x["early"] and x["state"] == "alive" and (x["mcap"] or 0) >= 1_000_000

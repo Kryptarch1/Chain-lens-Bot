@@ -228,7 +228,8 @@ async def profile_all(chain, d, n=20):
             ts = _ts(x.get("timeStamp"))
             if (x.get("to") or "").lower() == a:
                 k["n_in"] += 1
-                k["first"] = k["first"] or ts
+                if not k["first"]:
+                    k["first"], k["first_tx"] = ts, x.get("hash")
                 k["txs"].add(x.get("hash"))
                 if x.get("hash") in own:
                     k["in_own"] = True
@@ -241,6 +242,17 @@ async def profile_all(chain, d, n=20):
         per[a] = {"coins": real, "seen": seen, "own": own, "tt_oldest": _ts(tt[-1].get("timeStamp")) if tt else None, "tt_n": len(tt)}
         all_tokens |= set(real) | seen
     all_tokens -= {token}
+    if unreadable:
+        # transfer logs can't tell a buy from a sprayed fake coin (disperse bots hit hundreds of wallets per tx):
+        # keep a coin only if the wallet's first tx of it shows the wallet paying (lib/wprofile._is_buy)
+        cand = {(chain, c, a): k.get("first_tx") for a in unreadable for c, k in per[a]["coins"].items()}
+        ok, unr = await _real_buys(cand)
+        drop = 0
+        for a in unreadable:
+            keep = {c: k for c, k in per[a]["coins"].items() if (chain, c, a) in ok or (chain, c, a) in unr}
+            drop += len(per[a]["coins"]) - len(keep)
+            per[a]["coins"] = keep
+        notes.append(f"{chain} 30-day coins: {len(cand)} checked, {drop} were sprayed/airdropped (no payment in the tx) and are ignored")
     info = await _ds_tokens(chain, sorted(all_tokens))
     if unreadable:
         from lib.xchain import BORING
@@ -357,7 +369,7 @@ async def profile_all(chain, d, n=20):
             i = info.get(c) or {}
             early = bool(i.get("created") and k["first"] and k["first"] - i["created"] <= 3600)
             state = "no pool" if not i else ("dead" if (i.get("liq") or 0) < 1000 else "alive")
-            coins.append({"token": c, "name": i.get("name"), "symbol": i.get("symbol") or k["symbol"], "first": k["first"], "state": state,
+            coins.append({"token": c, "name": i.get("name"), "symbol": i.get("symbol") or k["symbol"], "first": k["first"], "first_tx": k.get("first_tx"), "state": state,
                           "mcap": i.get("mcap"), "liq": i.get("liq"), "early": early})
         coins.sort(key=lambda x: -(x["first"] or 0))
         now = d["now"]
@@ -385,7 +397,7 @@ async def profile_all(chain, d, n=20):
             "protocols": [(c, names.get(c) or None, k) for c, k in prot.most_common(5)],
             "xchain": xc_res.get(a), "chain_hist": ch_hist.get(a),
         }
-    d["shared"] = shared_coins(d, targets)
+    d["shared"] = await shared_coins(d, targets)
     notes.append(f"profiles: {len(targets)} wallets, history = newest 300 txs + 1000 token transfers each ({time.time() - t0:.1f}s; done at: "
                  + ", ".join(f"{k} {v:.0f}s" for k, v in tm.items()) + ")")
     return notes
@@ -483,22 +495,85 @@ def _similar(sym, name, d):
     return False
 
 
-def shared_coins(d, targets):
+SWAP_TOPICS = {
+    "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822",  # Uniswap/Pancake V2 Swap
+    "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",  # Uniswap V3 Swap
+    "0x19b47279256b2a23a1665c810c8d55a1758940ee09377d4f8d26497a3577dc83",  # PancakeSwap V3 Swap
+    "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f",  # Uniswap V4 Swap
+    "0xe1fffcc4923d04b559f4d29a8bfc6cda04eb5b0d3c460751c2402c5c5cc9109c",  # WETH/WBNB Deposit (native wrapped to pay)
+}
+LAUNCHPADS = {"0xe2ce6ab80874fa9fa2aae65d277dd6b8e65c9de0",  # Flap portal (bsc)
+              "0x5c952063c7fc8610ffdb798152d69f0b9550762b"}  # four.meme TokenManager (bsc)
+
+
+def _is_buy(rcpt, token, wallet):
+    """A real buy shows the wallet PAYING: a DEX swap / native wrapped in the tx, another token sent out by the wallet, or
+    a launchpad curve in the tx. A disperse/airdrop spam tx only moves the spam token (often to many wallets at once)."""
+    from lib.rpc import TRANSFER, topic_addr
+    for l in (rcpt or {}).get("logs") or []:
+        t = l.get("topics") or []
+        if not t:
+            continue
+        addr = (l.get("address") or "").lower()
+        if t[0] in SWAP_TOPICS or addr in LAUNCHPADS:
+            return True
+        if t[0] == TRANSFER and addr != token and len(t) == 3 and topic_addr(t[1]).lower() == wallet:
+            return True
+    return False
+
+
+async def _real_buys(pairs):
+    """pairs: {(chain, token, wallet): tx} -> set of keys whose tx is a real buy (receipts, one batch per chain)."""
+    by_chain = defaultdict(list)
+    for k, tx in pairs.items():
+        if tx:
+            by_chain[k[0]].append((k, tx))
+    ok, unread = set(), set()
+
+    async def one(ch, items):
+        try:
+            hashes = sorted({tx for _, tx in items})
+            rs = await asyncio.wait_for(RPC(ch).batch([("eth_getTransactionReceipt", [h]) for h in hashes]), 30)
+            rc = dict(zip(hashes, rs))
+        except Exception:
+            unread.update(k for k, _ in items)
+            return
+        for k, tx in items:
+            r = rc.get(tx)
+            if r is None:
+                unread.add(k)
+            elif _is_buy(r, k[1], k[2]):
+                ok.add(k)
+    await asyncio.gather(*[one(ch, it) for ch, it in by_chain.items()])
+    return ok, unread
+
+
+async def shared_coins(d, targets):
     """Other coins that SEVERAL top holders traded (home chain + their other chains). Many top holders in the same
     other coin = a team bundle reusing its wallets, or one degen group / copy-trade circle. Bought within minutes of
     each other = coordinated. A similar name = possibly the team's earlier coin or a copy."""
     hs = [h for h in targets if "holder" in h["roles"] and h.get("profile")][:20]
     rank = {h["addr"]: i for i, h in enumerate(hs)}
-    by, meta = defaultdict(dict), {}
+    by, meta, txof = defaultdict(dict), {}, {}
     for h in hs:
         a, p = h["addr"], h["profile"]
         for x in p.get("coin_list") or []:
             k = (d["chain"], x["token"])
-            by[k][a] = x["first"]; meta[k] = x
+            by[k][a] = x["first"]; meta[k] = x; txof[k + (a,)] = x.get("first_tx")
         for ch, v in (p.get("chain_hist") or {}).items():
             for x in (v or {}).get("all") or []:
                 k = (ch, x["token"])
-                by[k].setdefault(a, x["first"]); meta.setdefault(k, x)
+                if a not in by[k]:
+                    by[k][a] = x["first"]; txof[k + (a,)] = x.get("first_tx")
+                meta.setdefault(k, x)
+    # fake coins sprayed by disperse bots land in many wallets within seconds and look 'bought together': keep only
+    # wallets whose first tx of that coin was a real buy (the tx shows the wallet paying)
+    cand = {ka: tx for ka, tx in txof.items() if len(by[ka[:2]]) >= 2}
+    ok, unread = await _real_buys(cand)
+    spam = Counter()
+    for (ch, tok, a) in cand:
+        if (ch, tok, a) not in ok and (ch, tok, a) not in unread:
+            by[(ch, tok)].pop(a, None); spam[(ch, tok)] += 1
     from lib.xchain import BORING
     out = []
     for k, w in by.items():
@@ -555,6 +630,7 @@ def shared_coins(d, targets):
                          "pairs": [(rank[a] + 1, rank[b] + 1, shared[a, b], tog[a, b]) for a, b in sorted(prs, key=lambda p: (-tog[p], -shared[p]))]})
     clusters.sort(key=lambda c: -c["pct"])
     return {"n_top": len(hs), "n10": min(10, len(hs)), "coins": out[:15], "clusters": clusters,
+            "spam_dropped": sum(spam.values()), "spam_coins": len(spam), "buys_checked": len(cand), "buys_unread": len(unread),
             "crowd": crowd, "n_pairs": len(hs) * (len(hs) - 1) // 2}
 
 
@@ -576,6 +652,9 @@ def render_shared(d):
                  + f" (holders #{', #'.join(map(str, x['ranks']))})" + wtxt
                  + (f" · first bought {_ago(now, x['first'])} ago" if x["first"] else "")
                  + ("  ** SIMILAR NAME to this token **" if x["similar"] else ""))
+    if sh.get("buys_checked"):
+        L.append(f"   real-buy check: {sh['buys_checked']} wallet+coin first txs checked, {sh['spam_dropped']} were NOT buys (sprayed/airdropped coins,"
+                 f" {sh['spam_coins']} coins) and are ignored" + (f"; {sh['buys_unread']} receipts not read (kept)" if sh.get("buys_unread") else ""))
     if sh.get("n_pairs"):
         L.append(f"   overlap: {sh['crowd']} of {sh['n_pairs']} holder pairs share 5+ small coins"
                  + (" (high: this holder base is one trending-coin crowd)" if sh["crowd"] >= sh["n_pairs"] * 0.15 else ""))
