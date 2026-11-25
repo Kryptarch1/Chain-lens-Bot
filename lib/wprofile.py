@@ -136,6 +136,8 @@ async def profile_all(chain, d, n=20):
     sem = asyncio.Semaphore(4)
 
     async def hist(a):
+        if ex.es_id in explorer.FREE_UNSUPPORTED:
+            return [], []  # the explorer's fallback (HyperSync txlist, 15 req/min) costs ~25 s a wallet when rate limited
         async with sem:
             try:
                 tl, tt = await asyncio.gather(asyncio.wait_for(ex.txlist(a, limit=300), 60),
@@ -153,7 +155,37 @@ async def profile_all(chain, d, n=20):
         except Exception as e:
             return {}, [f"cross-chain activity failed ({type(e).__name__})"]
     xc_task = asyncio.create_task(xc())
+    from lib import chainhist
+
+    busy = set()
+
+    async def home_fb():
+        # bots with hundreds of txs a month flood the log scan (60 s+ timeouts): leave them out, they are labelled busy
+        try:
+            act, _ = await asyncio.wait_for(xchain._activity(chain, addrs, d["now"]), 20)
+            busy.update(a for a, v in act.items() if (v.get("d30") or 0) > 300)
+        except Exception:
+            pass
+        try:
+            return await asyncio.wait_for(chainhist.home_logs(chain, [a for a in addrs if a not in busy], d["now"], 30), 75)
+        except Exception as e:
+            notes.append(f"{chain} 30-day transfer-log fallback failed ({type(e).__name__})")
+            return {}
+    fb_task = asyncio.create_task(home_fb()) if ex.es_id in explorer.FREE_UNSUPPORTED else None
     hs = await asyncio.gather(*[hist(a) for a in addrs])
+    tm = {"history": time.time() - t0}
+    # the free Etherscan key can't list wallets on this chain (BSC/Base/Robinhood): never read "no history" as
+    # "brand-new"; use the node's last-30-day token transfers instead and say so
+    unreadable = set()
+    if ex.es_id in explorer.FREE_UNSUPPORTED:
+        unreadable = {a for a, (tl, tt) in zip(addrs, hs) if not tt}
+        if unreadable:
+            fb = await (fb_task or asyncio.create_task(home_fb()))
+            hs = [(tl, fb.get(a, []) if a in unreadable else tt) for a, (tl, tt) in zip(addrs, hs)]
+            notes.append(f"{chain} wallet history is NOT readable on the free Etherscan key: {len(unreadable)} profiles use the last 30 days "
+                         f"of token transfers from our node instead (age, dormancy and older coins not judged; Etherscan Lite unlocks it)")
+    elif fb_task:
+        fb_task.cancel()
     prices = await prices_task
     eth_usd = prices.get(chain) or prices.get("eth") or 0
     wealth_task = asyncio.create_task(_wealth(addrs, prices))
@@ -181,11 +213,21 @@ async def profile_all(chain, d, n=20):
                     k["in_own"] = True
             elif (x.get("from") or "").lower() == a:
                 k["out"] = True
-        real = {c: k for c, k in coins.items() if k["first"] and (k["in_own"] or k["out"])}
+        if a in unreadable:
+            real = {c: k for c, k in coins.items() if k["first"]}  # filtered below (pool + not a sprayed airdrop)
+        else:
+            real = {c: k for c, k in coins.items() if k["first"] and (k["in_own"] or k["out"])}
         per[a] = {"coins": real, "seen": seen, "own": own, "tt_oldest": _ts(tt[-1].get("timeStamp")) if tt else None, "tt_n": len(tt)}
         all_tokens |= set(real) | seen
     all_tokens -= {token}
     info = await _ds_tokens(chain, sorted(all_tokens))
+    if unreadable:
+        from lib.xchain import BORING
+        spray = Counter(c for a in unreadable for c, k in per[a]["coins"].items() if not k["out"])
+        for a in unreadable:
+            per[a]["coins"] = {c: k for c, k in per[a]["coins"].items()
+                               if (k["out"] or ((info.get(c) or {}).get("liq") and spray[c] < 4))
+                               and ((info.get(c) or {}).get("symbol") or "").upper() not in BORING}
 
     # ---- current balances of every token each wallet has touched (holdings)
     calls, keys = [], []
@@ -239,8 +281,10 @@ async def profile_all(chain, d, n=20):
         except Exception:
             names[c] = None
     await asyncio.gather(*[nm(c) for c in to_name[:25]])
+    tm["coins+names"] = time.time() - t0
     wealth = await wealth_task
     xc_res, xc_notes = await xc_task
+    tm["cross-chain"] = time.time() - t0
     notes += xc_notes
     # full history on each other chain the wallet is active on (top 4 by recent activity / coins)
     pairs = []
@@ -256,7 +300,6 @@ async def profile_all(chain, d, n=20):
         pairs += [(a, ch) for ch, _ in sorted(cand.items(), key=lambda kv: -kv[1])[:4]]
     ch_hist = {}
     if pairs:
-        from lib import chainhist
         try:
             ch_hist = await asyncio.wait_for(chainhist.collect(pairs, d["now"], prices), 150)
         except Exception as e:
@@ -265,6 +308,7 @@ async def profile_all(chain, d, n=20):
         if unread:
             notes.append(f"other-chain history NOT readable on {', '.join(unread)} with the free Etherscan key (Etherscan Lite covers them)")
 
+    tm["other-chain history"] = time.time() - t0
     # ---- assemble
     supply = d["supply"] / 10 ** d["decimals"]
     for h, (tl, tt) in zip(targets, hs):
@@ -308,7 +352,8 @@ async def profile_all(chain, d, n=20):
             "txs_read": len(tl), "tokentx_read": p["tt_n"], "history_from": p["tt_oldest"],
             "last_own_before": last_own, "last_any_before": last_any, "txs_30d_before": n30,
             "dormant_days": round((buy_ts - last_any) / 86400, 1) if last_any else None,
-            "app_trader": not own_tx and bool(tt),
+            "app_trader": not own_tx and bool(tt) and a not in unreadable,
+            "home_unreadable": a in unreadable, "home_busy": a in busy,
             "paid": paid, "entry_mcap": entry_mcap, "typical_buy": typical, "n_swaps_seen": len(swaps),
             "size_vs_usual": round(paid / typical, 1) if paid and typical else None,
             "deployed": deployed[:5], "n_deployed": len(deployed),
@@ -324,7 +369,8 @@ async def profile_all(chain, d, n=20):
             "protocols": [(c, names.get(c) or None, k) for c, k in prot.most_common(5)],
             "xchain": xc_res.get(a), "chain_hist": ch_hist.get(a),
         }
-    notes.append(f"profiles: {len(targets)} wallets, history = newest 300 txs + 1000 token transfers each ({time.time() - t0:.1f}s)")
+    notes.append(f"profiles: {len(targets)} wallets, history = newest 300 txs + 1000 token transfers each ({time.time() - t0:.1f}s; done at: "
+                 + ", ".join(f"{k} {v:.0f}s" for k, v in tm.items()) + ")")
     return notes
 
 
@@ -343,7 +389,12 @@ def render(d, h):
     L = []
     bt = h["first"]["ts"] if h.get("first") and h["first"].get("ts") else now
     act = f"     activity: {p['txs_30d_before']} own txs in the 30 days before this buy"
-    if p["last_any_before"]:
+    if p.get("home_unreadable"):
+        c = ((p.get("xchain") or {}).get("chains") or {}).get(d["chain"]) or {}
+        act = (f"     activity on {d['chain']}: {c.get('total', '?')} txs signed in its life / {c.get('d30', '?')} in last 30 d / {c.get('d7', '?')} in 7 d"
+               f" · its {d['chain']} tx list is NOT readable on the free Etherscan key: wallet age, dormancy and coins older than 30 d not judged"
+               + (" · signs no txs itself (trades through an app/relayer, or a smart account)" if c.get("total") in (0, 1) else ""))
+    elif p["last_any_before"]:
         act += f" · last activity of any kind before it: {_ago(bt, p['last_any_before'])} earlier"
         other30 = sum((v.get("d30") or 0) for c, v in ((p.get("xchain") or {}).get("chains") or {}).items() if c != d["chain"])
         if p["dormant_days"] and p["dormant_days"] >= 30:
@@ -366,6 +417,10 @@ def render(d, h):
                 b += f" → {p['size_vs_usual']}x usual" + ("  ** OUT OF CHARACTER **" if p["size_vs_usual"] >= 3 else "")
         L.append(b)
     hist_from = f", history read back to {_ago(now, p['history_from'])} ago" if p["history_from"] else ""
+    if p.get("home_unreadable"):
+        hist_from = " (last 30 d only, from transfer logs)"
+        if p.get("home_busy"):
+            hist_from = " — NOT SCANNED: bot-level activity (> 300 txs in 30 d) floods the log scan"
     L.append(f"     past coins: {p['coins_total']} traded{hist_from} · {p['coins_30d']} in last 30 d · {p['coins_90d']} in 90 d"
              f" · alive {p['alive']} / dead or no pool {p['dead']} · bought within 1 h of launch: {p['early']}")
     if p["early_winners"]:

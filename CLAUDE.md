@@ -134,6 +134,13 @@ OTHER-CHAIN HISTORY (lib/chainhist.py, inside the profiles): for each wallet's t
 size, last active, holdings there. The free Etherscan key does NOT serve base, bsc, rh, arc (printed as "not readable")
 -> Etherscan Lite ($49/mo) on the same key unlocks them. DORMANT now means quiet on EVERY chain (a wallet quiet on eth
 but busy on bsc is shown as not dormant).
+MARKETS (lib/holders.find_markets): any contract that sent the token to >= 20 wallets AND received it from >= 20 is a market
+(launchpad bonding curve like Flap's portal 0xe2ce…9de0, or a router) and counts as a pool, so curve buys are BUYS, not
+'received from'. HOME CHAIN NOT READABLE (bsc/base/rh on the free key): profiles never read 'no history' as brand-new; they
+use the last 30 d of the wallets' token transfers from our node (chainhist.home_logs, ~10 s, no HyperSync) and print
+'activity on <chain>: N txs signed (nonce) … age/dormancy not judged'; wallets with > 300 txs in 30 d are skipped as
+bot-level. Wallets that sign ~1 tx and trade through a relayer are app accounts (BSC trading apps); a 1e-18 BNB 'funding' from
+a service (0x2ac6…25dc) is an app marker, not real funding or wallet age.
 ANSWER FORMAT (user rules): wallets only, no safety lines; EVERY wallet is a clickable explorer link; overview of the
 current situation first, then a section per top wallet; deep, not a summary table.
 

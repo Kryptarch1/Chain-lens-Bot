@@ -161,3 +161,36 @@ def render(hist, now):
         if x["holdings"]:
             L.append(f"       holds on {ch}: {_usd(x['holdings_usd'])} — " + ", ".join(f"{s} {_usd(u)}" for u, s in x["holdings"]))
     return L
+
+
+async def home_logs(chain, addrs, now, days=30):
+    """Fallback when the home chain's explorer can't list a wallet's history (BSC/Base/Robinhood on the free Etherscan
+    key): the wallets' token transfers of the last `days` days from one multi-wallet Transfer log scan on our own node
+    (no HyperSync: its free plan is the scarce resource). -> {addr: tokentx-shaped rows, newest first}; timestamps are
+    estimated from block numbers (steady block times)."""
+    from lib.lp import estimate_block
+    from lib.rpc import TRANSFER, topic_addr, pad_addr
+    rpc = RPC(chain)
+    latest = await rpc.block_number()
+    b0, _ = await estimate_block(rpc, now - days * 86400, latest)
+    b0 += 2000
+    spb = days * 86400 / max(1, latest - b0)
+    pads = [pad_addr(a) for a in addrs]
+    ins, outs = await asyncio.gather(rpc._rpc_logs(None, [TRANSFER, None, pads], b0, latest, None),
+                                     rpc._rpc_logs(None, [TRANSFER, pads], b0, latest, None))
+    aset, out = set(addrs), defaultdict(list)
+    for l in ins + outs:
+        t = l.get("topics") or []
+        if len(t) != 3:
+            continue
+        fr, to = topic_addr(t[1]).lower(), topic_addr(t[2]).lower()
+        blk = int(l["blockNumber"], 16)
+        d = l.get("data") or "0x"
+        row = {"hash": l.get("transactionHash"), "from": fr, "to": to, "contractAddress": l["address"].lower(),
+               "tokenSymbol": None, "value": str(int(d, 16) if len(d) > 2 else 0), "blockNumber": str(blk),
+               "timeStamp": str(int(now - (latest - blk) * spb)), "via": "logs"}
+        for a in {fr, to} & aset:
+            out[a].append(row)
+    for a in out:
+        out[a].sort(key=lambda r: -int(r["blockNumber"]))
+    return dict(out)

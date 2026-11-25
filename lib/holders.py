@@ -102,6 +102,24 @@ def replay(rows, pools):
     return bal, act, start
 
 
+async def find_markets(rpc, rows, pools, n=20):
+    """Contracts that SELL the token to many wallets and BUY it back from many (a launchpad bonding curve, or a market a
+    DEX pair list doesn't know). They are treated as pools, so curve buys count as buys instead of 'received from'.
+    Routers only pass tokens through in the same tx (net zero), so adding them changes nothing."""
+    to_n, from_n = defaultdict(set), defaultdict(set)
+    for r in rows:
+        to_n[r["from"]].add(r["to"]); from_n[r["to"]].add(r["from"])
+    cand = [a for a in to_n if a not in pools and a != ZERO and len(to_n[a]) >= n and len(from_n.get(a, ())) >= n]
+    if not cand:
+        return []
+    codes = await rpc.batch([("eth_getCode", [a, "latest"]) for a in cand])
+    out = []
+    for a, c in zip(cand, codes):
+        if c and c != "0x" and delegation_7702(c) is None:
+            out.append(a)
+    return out
+
+
 class Links:
     """Two union-finds over wallets: PROVEN links (on-chain facts) and ALL links (proven + likely), with the evidence."""
     def __init__(self):
@@ -151,6 +169,8 @@ async def collect(chain, token, top=25, profile=20):
     for p in pairs:
         if len(p.get("pairAddress") or "") == 66 and (p.get("pm") or v4):
             pools.add((p.get("pm") or v4).lower())
+    markets = await find_markets(rpc, rows, pools)
+    pools |= set(markets)
     bal, act, start = replay(rows, pools)
     sym = rpc.cfg.get("symbol", "ETH")
     dec = info.get("decimals") or 18
@@ -478,7 +498,7 @@ async def collect(chain, token, top=25, profile=20):
             "native": sym, "devs": sorted(devs), "created_block": info["created_block"], "created_ts": bts.get(info["created_block"]),
             "start_block": start, "start_ts": bts.get(start) if start else None, "now": now, "latest": latest,
             "mcap": pair0.get("marketCap") or pair0.get("fdv"), "liq": (pair0.get("liquidity") or {}).get("usd"),
-            "n_transfers": len(rows), "n_holders": sum(1 for a, v in bal.items() if v > 0 and a not in skip), "n_ever": sum(1 for a in act if a not in skip), "pools": sorted(pools),
+            "n_transfers": len(rows), "n_holders": sum(1 for a, v in bal.items() if v > 0 and a not in skip), "n_ever": sum(1 for a in act if a not in skip), "pools": sorted(pools), "markets": markets,
             "hold": sorted(hold.values(), key=lambda h: -h["bal"]), "wallets": wallets, "funders": fk, "groups": groups,
             "possible": possible, "notes": notes, "timing": timing}
     if profile:
@@ -572,6 +592,9 @@ def render(d):
         if h["bal"] > 0:
             kinds[h["kind"]] += h["pct"]
     now_w = [h for h in d["wallets"] if "holder" in h["roles"]]
+    if d.get("markets"):
+        L.append(f"   {len(d['markets'])} market contract(s) found in the transfers (bonding curve / router / pool not in the DEX pair list; buys from them count as buys): "
+                 + ", ".join(d["markets"][:4]) + (" …" if len(d["markets"]) > 4 else ""))
     L.append("SUPPLY NOW  " + " · ".join(f"{k} {v:.1f}%" for k, v in sorted(kinds.items(), key=lambda kv: -kv[1]) if k != "wallet" and v >= 0.05)
              + f" · top {len(now_w)} wallets {sum(h['pct'] for h in now_w):.1f}%")
     for h in d["hold"]:
@@ -626,6 +649,12 @@ def render(d):
             L += _wallet_lines(d, h)
     if d["notes"]:
         L.append("NOT CHECKED / NOTES")
-        L += [f"   - {n}" for n in d["notes"][:25]]
+        miss = [n for n in d["notes"] if n.startswith("funder of ") and " not found" in n]
+        rest = [n for n in d["notes"] if n not in miss]
+        L += [f"   - {n}" for n in rest[:25]]
+        if miss:
+            why = Counter(n.split(" not found", 1)[1].strip(" ()") or "no funding tx found" for n in miss)
+            L.append(f"   - funder not found for {len(miss)} wallet(s): " + "; ".join(f"{k} ×{v}" for k, v in why.most_common())
+                     + " — " + ", ".join(n.split()[2] for n in miss[:40]))
     L.append(f"   ({d['secs']}s: " + ", ".join(f"{k} {v}s" for k, v in d["timing"].items()) + ")")
     return "\n".join(L)
