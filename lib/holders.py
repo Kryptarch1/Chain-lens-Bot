@@ -205,7 +205,10 @@ async def collect(chain, token, top=25, profile=20, full=False):
     feeders = sorted({s for c in coll for s in act[c]["recv_from"] if s not in skip}, key=lambda a: -acq.get(a, 0))
     supply0 = info.get("supply") or sum(v for v in bal.values() if v > 0) or 1
     tail = [a for a, v in sorted(bal.items(), key=lambda kv: -kv[1]) if v >= supply0 * TAIL_MIN and a not in skip][:TAIL_CAP] if full else []
-    cand = list(dict.fromkeys(by_bal + by_acq + coll + dist + feeders[:120] + sorted(devs) + tail))
+    from lib import tracked
+    trk = tracked.load()
+    trk_in = sorted(a for a in trk if a in act and a not in skip)  # tracked wallets that ever held this token
+    cand = list(dict.fromkeys(by_bal + by_acq + coll + dist + feeders[:120] + sorted(devs) + tail + trk_in))
     res = await rpc.batch([("eth_getCode", [a, "latest"]) for a in cand] +
                           [("eth_call", [{"to": token, "data": encode_call("balanceOf(address)", [a])}, "latest"]) for a in cand])
     codes, bals = res[:len(cand)], res[len(cand):]
@@ -249,7 +252,10 @@ async def collect(chain, token, top=25, profile=20, full=False):
                       ("dev", [d for d in devs if isw(d)])):
         for a in lst:
             hold[a]["roles"].append(role)
-    W0 = list(dict.fromkeys(top_now + exited + coll_w + dist_w + feed_w[:40] + [d for d in devs if isw(d)]))
+    for a in trk_in:
+        if a in hold:
+            hold[a]["roles"].append("tracked")
+    W0 = list(dict.fromkeys(top_now + exited + coll_w + dist_w + feed_w[:40] + [d for d in devs if isw(d)] + [a for a in trk_in if isw(a)]))
     tail_w = [a for a in tail if isw(a) and hold[a]["bal"] > 0 and a not in W0]
     for a in tail_w:
         hold[a]["roles"].append("small holder")
@@ -657,6 +663,32 @@ async def collect(chain, token, top=25, profile=20, full=False):
             possible.append({"kind": f"first buy in the same block, {b - start} block(s) after trading started", "via": None,
                              "members": [x["addr"] for x in hs], "pct": sum(x["pct"] for x in hs), "got_pct": sum(x["got_pct"] for x in hs)})
 
+    # --- the user's tracked wallets: in this token, funding a holder, or inside a group / same-coin cluster
+    tr_rows = []
+    by_w = {h["addr"]: h for h in wallets}
+    rank_now = {h["addr"]: i for i, h in enumerate(sorted([h for h in wallets if h["bal"] > 0], key=lambda h: -h["bal"]), 1)}
+    gidx = {a: (i, g) for i, g in enumerate(groups, 1) for a in g["members"]}
+    cidx = {a: (i, c) for i, c in enumerate(((net or {}).get("clusters") or []), 1) for a in c["who"]}
+    for a, lab in trk.items():
+        h = by_w.get(a)
+        funded = [x["addr"] for x in wallets if x["addr"] != a and (x.get("funder") == a or fk.get(x.get("funder") or "", {}).get("funder") == a)]
+        if not h and not funded:
+            continue
+        r = {"addr": a, "label": lab, "funded": funded}
+        if h:
+            got = h["bought"] + h["received"] + h["minted"]
+            f = h.get("first") or {}
+            r.update({"pct": h["pct"], "got_pct": h["got_pct"], "rank": rank_now.get(a), "sold_share": (h["sold"] + h["sent"]) / got if got else 0,
+                      "first_kind": f.get("kind"), "first_ts": f.get("ts"), "after_start": f.get("after_start"), "paid": f.get("value")})
+            if a in gidx:
+                i, g = gidx[a]
+                r["group"] = (i, g["conf"], [m for m in g["members"] if m != a])
+            if a in cidx:
+                i, c = cidx[a]
+                r["cluster"] = (i, [m for m in c["who"] if m != a])
+        tr_rows.append(r)
+    tr_rows.sort(key=lambda r: (-(r.get("pct") or 0), -(r.get("got_pct") or 0)))
+
     pair0 = pairs[0] if pairs else {}
     out = {"chain": chain, "token": token, "name": info.get("name"), "symbol": info.get("symbol"), "decimals": dec, "supply": supply,
             "native": sym, "devs": sorted(devs), "created_block": info["created_block"], "created_ts": bts.get(info["created_block"]),
@@ -665,7 +697,7 @@ async def collect(chain, token, top=25, profile=20, full=False):
             "n_transfers": len(rows), "n_holders": sum(1 for a, v in bal.items() if v > 0 and a not in skip), "n_ever": sum(1 for a in act if a not in skip), "pools": sorted(pools), "markets": markets,
             "hold": sorted(hold.values(), key=lambda h: -h["bal"]), "wallets": wallets, "funders": fk, "groups": groups,
             "possible": possible, "notes": notes, "timing": timing, "full": full, "breakdown": breakdown,
-            "net_clusters": (net or {}).get("clusters")}
+            "net_clusters": (net or {}).get("clusters"), "tracked": tr_rows, "n_tracked_list": len(trk)}
     if profile:
         t = time.time()
         from lib import wprofile
@@ -694,7 +726,8 @@ def _wallet_lines(d, h, n=None):
     when = f"block +{f['after_start']}" if f.get("after_start") is not None and f["after_start"] >= 0 else "before trading"
     mins = f" ({_age(f['ts'] - d['start_ts'])} after start)" if f.get("ts") and d.get("start_ts") and f["ts"] >= d["start_ts"] else ""
     roles = [r for r in h["roles"] if r != "holder"]
-    L = [f" {('#%d ' % n) if n else ''}{h['addr']}  now {h['pct']:.2f}% · got {h['got_pct']:.2f}% in total" + (f"  [{', '.join(roles).upper()}]" if roles else "")]
+    from lib.tracked import tag
+    L = [f" {('#%d ' % n) if n else ''}{h['addr']}  now {h['pct']:.2f}% · got {h['got_pct']:.2f}% in total" + (f"  [{', '.join(roles).upper()}]" if roles else "") + tag(h["addr"])]
     line = f"     tokens: first {how} {when}{mins}"
     if how == "bought" and f.get("value"):
         line += f", tx value {f['value']:.4g} {d['native']}"
@@ -743,9 +776,42 @@ def _funder_text(d, h):
     return line
 
 
+def render_tracked(d):
+    """YOUR TRACKED WALLETS block: who from the user's list is in this coin, and how."""
+    rows = d.get("tracked")
+    if rows is None:
+        return []
+    from lib.tracked import label
+    if not rows:
+        return [f"YOUR TRACKED WALLETS  none of your {d.get('n_tracked_list', 0)} tracked wallets touched this coin or funded a holder"]
+    L = [f"YOUR TRACKED WALLETS  {len(rows)} of your {d.get('n_tracked_list', 0)} are in this coin"]
+    start = d.get("start_ts")
+    for r in rows:
+        if "pct" in r:
+            when = ""
+            if r.get("first_ts") and start:
+                when = f"{'bought' if r['first_kind'] == 'bought' else r['first_kind']} {_age(r['first_ts'] - start)} after start"
+            pos = (f"holds {r['pct']:.2f}% (#{r['rank']})" if r["pct"] >= 0.0005 else "holds nothing now") + f" · got {r['got_pct']:.2f}%"
+            if r["sold_share"] >= 0.01:
+                pos += f" · sold/sent {100 * min(1, r['sold_share']):.0f}%"
+            L.append(f" ★ {r['label']}  {r['addr']}  {pos}" + (f" · {when}" if when else "") + (f" · paid {r['paid']:.4g} {d['native']}" if r.get("paid") else ""))
+        else:
+            L.append(f" ★ {r['label']}  {r['addr']}  does not hold it")
+        if r.get("group"):
+            i, conf, ms = r["group"]
+            L.append(f"     in linked group ({conf.upper()}) with " + ", ".join(m + (f" ({label(m)})" if label(m) else "") for m in ms[:5]) + (" …" if len(ms) > 5 else ""))
+        if r.get("cluster"):
+            i, ms = r["cluster"]
+            L.append(f"     same-coin cluster C{i} with " + ", ".join(m + (f" ({label(m)})" if label(m) else "") for m in ms[:5]) + (" …" if len(ms) > 5 else ""))
+        if r["funded"]:
+            L.append(f"     funded {len(r['funded'])} wallet(s) in this coin: " + ", ".join(r["funded"][:5]) + (" …" if len(r["funded"]) > 5 else ""))
+    return L
+
+
 def render(d):
     if d.get("error"):
         return f"== HOLDERS: {d['error']}"
+    from lib.tracked import tag
     q = lambda v: v / 10 ** d["decimals"]
     L = [f"== HOLDERS {d['symbol']} ({d['name']}) on {d['chain']}  {d['token']}",
          f"   age {_age(d['now'] - d['created_ts']) if d['created_ts'] else '?'} · mcap {('$%s' % format(int(d['mcap']), ',')) if d['mcap'] else '?'}"
@@ -762,6 +828,7 @@ def render(d):
                  + ", ".join(d["markets"][:4]) + (" …" if len(d["markets"]) > 4 else ""))
     L.append("SUPPLY NOW  " + " · ".join(f"{k} {v:.1f}%" for k, v in sorted(kinds.items(), key=lambda kv: -kv[1]) if k != "wallet" and v >= 0.05)
              + f" · top {len(now_w)} wallets {sum(h['pct'] for h in now_w):.1f}%")
+    L += render_tracked(d)
     for h in d["hold"]:
         if h["kind"] in ("contract", "locker") and h["pct"] >= 0.5:
             L.append(f"   {h['kind']} {h['addr']} holds {h['pct']:.2f}%" + (f" ({h['name']})" if h.get("name") else ""))
@@ -774,7 +841,7 @@ def render(d):
                  f"{'  ** INCLUDES THE DEV **' if g['dev'] else ''}")
         for a in g["members"][:8]:
             h = by[a]
-            L.append(f"     {a}  now {h['pct']:.2f}% · got {h['got_pct']:.2f}%  [{', '.join(h['roles'])}]")
+            L.append(f"     {a}  now {h['pct']:.2f}% · got {h['got_pct']:.2f}%  [{', '.join(h['roles'])}]" + tag(a))
         if n > 8:
             L.append(f"     … and {n - 8} more")
         for w in g["why"][:8]:
@@ -872,9 +939,11 @@ def render_full(d, deep=None):
     hw = sorted([h for h in d["wallets"] if h["bal"] > 0], key=lambda h: -h["bal"])
     rank = {h["addr"]: i for i, h in enumerate(hw, 1)}
     by = {h["addr"]: h for h in d["wallets"]}
+    from lib.tracked import tag
     L = ["", f"== ALL HOLDERS: {b.get('n_checked', 0)} wallets checked (every wallet with >= 0.01% of supply), "
              f"{b.get('n_dust', 0)} dust wallets below that"]
     L.append("SUPPLY 100%  " + " · ".join(f"{k} {v:.1f}%" for k, v in b.get("buckets", []) if v >= 0.05))
+    L += render_tracked(d)
     G = sorted([g for g in d["groups"] if g["pct"] >= 0.1 or g["got_pct"] >= 0.5], key=lambda g: (g["pct"] < 0.05, g["conf"] != "proven", -g["pct"], -g["got_pct"]))
     rest = [g for g in d["groups"] if g not in G]
     L.append(f"LINKED GROUPS ACROSS ALL HOLDERS  {len(d['groups'])} group(s) hold {sum(g['pct'] for g in d['groups']):.1f}% now"
@@ -889,7 +958,7 @@ def render_full(d, deep=None):
         for a in sorted(m, key=lambda a: -by[a]["bal"])[:6]:
             h = by[a]
             L.append(f"     {('#%d' % rank[a]) if a in rank else '  -'} {a}  now {h['pct']:.2f}% · got {h['got_pct']:.2f}%"
-                     + (" · sold %.0f%%" % (100 * h["sold"] / max(1, h["bought"] + h["received"] + h["minted"])) if h["sold"] else ""))
+                     + (" · sold %.0f%%" % (100 * h["sold"] / max(1, h["bought"] + h["received"] + h["minted"])) if h["sold"] else "") + tag(a))
         if len(m) > 6:
             L.append(f"     … +{len(m) - 6} more wallets holding {sum(by[a]['pct'] for a in sorted(m, key=lambda a: -by[a]['bal'])[6:]):.2f}%")
         for w in g["why"][:4]:
@@ -908,7 +977,7 @@ def render_full(d, deep=None):
                 h = by.get(a)
                 if h:
                     L.append(f"     {('#%d' % rank[a]) if a in rank else '  -'} {a}  now {h['pct']:.2f}%"
-                             + (" · sold %.0f%%" % (100 * h["sold"] / max(1, h["bought"] + h["received"] + h["minted"])) if h["sold"] else ""))
+                             + (" · sold %.0f%%" % (100 * h["sold"] / max(1, h["bought"] + h["received"] + h["minted"])) if h["sold"] else "") + tag(a))
             if len(c["who"]) > 8:
                 L.append(f"     … +{len(c['who']) - 8} more")
             for a, b, n, t, t1, m in c["pairs"][:3]:

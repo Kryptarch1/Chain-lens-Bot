@@ -58,6 +58,7 @@ owner-only functions and says "ask for dd sim to confirm".
 | Deep check (stateful sell tests: delayed honeypot, sell caps, funds taken) — ONLY when asked | `dd check <chain> <token> --deep` or `dd sell <chain> <token>` |
 | What does this ONE function really do (read the code) | `dd code <chain> <address> <function>` (name, signature or selector; `--from 0x..` `--args a,b` to choose caller/args; works on proxies and hooks) |
 | Where did a wallet's money come from | `dd trace <chain> <wallet>` |
+| The user's tracked wallets (KOL/hunter list) | `dd tracked list [text]`, `dd tracked add <0x> <label>`, `dd tracked rm <0x>` |
 | Who holds it / wallet analysis / bundles / "analyse the holders" | `dd holders <chain> <token>` (quick pass, then deep profiles + ALL HOLDERS (every wallet >= 0.01%); `--fast` quick only, `--top N`, `--json`) — then write the deep analysis yourself (see HOLDERS below) |
 | Anything else (old toolkit) | `dd <chain> token|audit|cast|rpc|fork|wallet` |
 
@@ -178,6 +179,11 @@ RELATIVE to activity (m = coins the less active wallet traded): >= 3 within 60 s
 them. Pairs with dozens of coins bought within 60 s (e.g. 116 of 132) are one operator. Timing: cold ~350 holders ~1.5-3 min,
 ~600 holders ~5 min for the ALL HOLDERS section (quick pass ~10 s and deep profiles ~35-50 s still print first); histories cached
 30 min, funders forever.
+TRACKED WALLETS (2026-11-25): the user's private list (KOLs, hunters, insiders; 118 at start) is data/tracked.json — data/
+is never pushed, keep it that way. `dd tracked list [text] | add <0x> <label> | rm <0x>`. `dd holders` gives every tracked
+wallet that ever held the token a full profile and prints YOUR TRACKED WALLETS (holds % / rank, sold, when + paid, linked
+group, same-coin cluster, holders it funded) in the quick pass and ALL HOLDERS; '★ label' tags on every wallet line.
+Lead the answer with tracked hits when there are any (the user follows these wallets).
 REAL-BUY CHECK (wprofile._is_buy / _real_buys, 2026-11-25): disperse bots spray fake coins to hundreds of wallets per tx
 (mihao/FLOAT on BSC: 317 recipients in one tx), which looked like 'shared coins bought together'. A wallet+coin counts only
 if its first tx of that coin shows the wallet PAYING: a V2/V3/PancakeV3/V4 Swap or WBNB/WETH Deposit in the receipt, another
