@@ -149,7 +149,13 @@ class Links:
         return [v for v in g.values() if len(v) > 1]
 
 
-async def collect(chain, token, top=25, profile=20):
+TAIL_MIN = 1e-4  # full pass: every wallet holding at least 0.01% of supply (~99% of what wallets hold); smaller = dust
+TAIL_CAP = 700
+
+
+async def collect(chain, token, top=25, profile=20, full=False):
+    """full=True: also profile EVERY wallet holding >= 0.01% of supply (role 'small holder'), so the links and groups
+    cover the whole holder base, not just the top wallets. Their funders come from our archive node (lib/nodefund)."""
     t0 = time.time()
     rpc, ex = RPC(chain), explorer.Explorer(chain)
     token = token.lower()
@@ -196,7 +202,9 @@ async def collect(chain, token, top=25, profile=20):
     coll = [a for a, x in act.items() if a not in skip and len([s for s in x["recv_from"] if s not in skip]) >= 3]
     dist = [a for a, x in act.items() if a not in skip and len([s for s in x["sent_to"] if s not in skip]) >= 3]
     feeders = sorted({s for c in coll for s in act[c]["recv_from"] if s not in skip}, key=lambda a: -acq.get(a, 0))
-    cand = list(dict.fromkeys(by_bal + by_acq + coll + dist + feeders[:120] + sorted(devs)))
+    supply0 = info.get("supply") or sum(v for v in bal.values() if v > 0) or 1
+    tail = [a for a, v in sorted(bal.items(), key=lambda kv: -kv[1]) if v >= supply0 * TAIL_MIN and a not in skip][:TAIL_CAP] if full else []
+    cand = list(dict.fromkeys(by_bal + by_acq + coll + dist + feeders[:120] + sorted(devs) + tail))
     res = await rpc.batch([("eth_getCode", [a, "latest"]) for a in cand] +
                           [("eth_call", [{"to": token, "data": encode_call("balanceOf(address)", [a])}, "latest"]) for a in cand])
     codes, bals = res[:len(cand)], res[len(cand):]
@@ -240,7 +248,12 @@ async def collect(chain, token, top=25, profile=20):
                       ("dev", [d for d in devs if isw(d)])):
         for a in lst:
             hold[a]["roles"].append(role)
-    W = list(dict.fromkeys(top_now + exited + coll_w + dist_w + feed_w[:40] + [d for d in devs if isw(d)]))
+    W0 = list(dict.fromkeys(top_now + exited + coll_w + dist_w + feed_w[:40] + [d for d in devs if isw(d)]))
+    tail_w = [a for a in tail if isw(a) and hold[a]["bal"] > 0 and a not in W0]
+    for a in tail_w:
+        hold[a]["roles"].append("small holder")
+    W = W0 + tail_w
+    tail_set = set(tail_w)
     wallets = [hold[a] for a in W]
 
     # --- per wallet: the tx that first gave it tokens, block times, tx count, native balance, first funder
@@ -254,12 +267,16 @@ async def collect(chain, token, top=25, profile=20):
             return {"error": type(e).__name__}
 
     async def funded_all():
-        return await funded_many(W)
+        a, b = await asyncio.gather(funded_many(W0), funded_many(tail_w, node=True))
+        return a + b
 
-    async def funded_many(W):
+    async def funded_many(W, node=False):
         # the explorer can't list wallets on this chain (BSC/Base/RH free key) and HyperSync's free plan runs out:
-        # binary-search our own archive node instead (lib/nodefund), explorer path only for what that misses
-        if not (rpc.private and ex.es_id in explorer.FREE_UNSUPPORTED):
+        # binary-search our own archive node instead (lib/nodefund), explorer path only for what that misses.
+        # node=True (hundreds of small holders): always the node when we have a private one
+        if not W:
+            return []
+        if not (rpc.private and (node or ex.es_id in explorer.FREE_UNSUPPORTED)):
             return await asyncio.gather(*[funded(a) for a in W])
         from lib import cache, nodefund
         res, miss = {}, []
@@ -275,7 +292,7 @@ async def collect(chain, token, top=25, profile=20):
             nn = {a: int(r0[i], 16) if r0[i] else 0 for i, a in enumerate(miss)}
             bb = {a: int(r0[n + i], 16) if r0[n + i] else 0 for i, a in enumerate(miss)}
             try:
-                nf = await asyncio.wait_for(nodefund.first_funding_many(chain, miss, nn, bb, latest), 90)
+                nf = await asyncio.wait_for(nodefund.first_funding_many(chain, miss, nn, bb, latest), 240 if node else 90)
             except Exception as e:
                 nf = {a: {"error": type(e).__name__} for a in miss}
             for a in miss:
@@ -284,8 +301,8 @@ async def collect(chain, token, top=25, profile=20):
                     res[a] = {k: x[k] for k in ("from", "tx", "time", "internal") if k in x}
                     cache.set(f"funded:{chain}:{a}", res[a], ttl=None)
                 elif x.get("none"):
-                    res[a] = {}
-                    cache.set(f"funded:{chain}:{a}", {}, ttl=600)
+                    res[a] = {"sponsored": True} if x.get("sponsored") else {}
+                    cache.set(f"funded:{chain}:{a}", res[a], ttl=None if x.get("sponsored") else 600)
                 else:
                     res[a] = {"error": "node: " + str(x.get("error"))}
         return [res[a] for a in W]
@@ -318,7 +335,9 @@ async def collect(chain, token, top=25, profile=20):
         fb = fund[i] or {}
         h["funder"] = (fb.get("from") or "").lower() or None
         h["fund_tx"], h["fund_ts"] = fb.get("tx"), _ts(fb.get("time"))
-        if fb.get("error") or not fb:
+        if fb.get("sponsored"):
+            h["sponsored"] = True  # never held native coin before its first tx: an app's gas-sponsored / smart-wallet account
+        elif fb.get("error") or not fb:
             notes.append(f"funder of {a} not found ({fb.get('error') or 'no inbound native transfer seen'})")
 
     # --- funders: exchange / contract / plain wallet; one more hop for plain wallets; bridge payouts matched to their origin
@@ -368,6 +387,7 @@ async def collect(chain, token, top=25, profile=20):
             h["fund_marker"] = h["funder"]
             h["funder"] = h["fund_tx"] = h["fund_ts"] = h["fund_block"] = None
     hop2 = [f for f in F if fk[f]["kind"] == "wallet" and f not in W]
+    hop2_node = bool(tail_w)
     sem = asyncio.Semaphore(6)
 
     async def bridge(h):
@@ -377,7 +397,8 @@ async def collect(chain, token, top=25, profile=20):
             except Exception:
                 return None
 
-    maybe_bridge = [h for h in wallets if h["funder"] and h["fund_tx"] and fk[h["funder"]]["kind"] != "wallet"]
+    maybe_bridge = [h for h in wallets if h["funder"] and h["fund_tx"] and fk[h["funder"]]["kind"] != "wallet"
+                    and (h["addr"] not in tail_set or fk[h["funder"]]["kind"] == "contract")]
     timing["funders: services+amounts"] = time.time() - t
     t2 = time.time()
 
@@ -385,7 +406,7 @@ async def collect(chain, token, top=25, profile=20):
         r = await co
         timing[k] = time.time() - t2
         return r
-    h2, br = await asyncio.gather(_tm("funders: 2nd hop", funded_many(hop2)), _tm("funders: bridges", asyncio.gather(*[bridge(h) for h in maybe_bridge])))
+    h2, br = await asyncio.gather(_tm("funders: 2nd hop", funded_many(hop2, node=hop2_node)), _tm("funders: bridges", asyncio.gather(*[bridge(h) for h in maybe_bridge])))
     for f, r in zip(hop2, h2):
         fk[f]["funder"] = ((r or {}).get("from") or "").lower() or None
     G = sorted({v["funder"] for v in fk.values() if v.get("funder")} - set(fk))
@@ -417,7 +438,9 @@ async def collect(chain, token, top=25, profile=20):
         tos = Counter((t.get("to") or "").lower() for t in tl if (t.get("from") or "").lower() == x)
         n = sum(tos.values())
         return n >= 50 and tos.most_common(1)[0][1] >= 0.9 * n
-    chk = [x for x in signers if x not in relayer and sk[x] >= 50]
+    n_signed = Counter((h.get("first") or {}).get("signer") for h in wallets)
+    top_signers = {(h.get("first") or {}).get("signer") for h in wallets if h["addr"] not in tail_set}
+    chk = [x for x in signers if x not in relayer and sk[x] >= 50 and (x in top_signers or n_signed[x] >= 2)]
     for x, r in zip(chk, await asyncio.gather(*[app_relayer(x) for x in chk])):
         if r:
             relayer.add(x)
@@ -457,6 +480,20 @@ async def collect(chain, token, top=25, profile=20):
     for f, ws in by_f.items():
         for w in ws[1:]:
             L.join(ws[0], w, f"same first funder {f} ({fk[f]['nonce']} txs)")
+    # one BUY tx delivered tokens to several holders = one wallet paid for all of them (a bundle buy). An airdrop
+    # (no buy) to many wallets is not proof: disperse bots and promo drops hit strangers.
+    by_tx = defaultdict(list)
+    for h in wallets:
+        f = h.get("first") or {}
+        if f.get("kind") == "bought" and f.get("tx"):
+            by_tx[f["tx"]].append(h["addr"])
+    for tx, ws in by_tx.items():
+        # a fee / referral wallet also gets a small cut in the buy tx: only wallets that got a real share count
+        big = max((act[a]["first"]["amount"] for a in ws), default=0)
+        ws = [a for a in ws if act[a]["first"]["amount"] >= big * 0.1]
+        if 2 <= len(ws) <= 30:
+            for w in ws[1:]:
+                L.join(ws[0], w, f"first tokens bought in ONE tx {tx} that delivered to {len(ws)} holders (bundle buy)")
     for g, ws in by_g.items():
         for w in ws[1:]:
             L.join(ws[0], w, f"funders share one funder {g} (2 hops)")
@@ -501,13 +538,48 @@ async def collect(chain, token, top=25, profile=20):
         if not any(set(g) <= p for p in proven_sets):
             groups.append(group(g, "likely"))
     groups.sort(key=lambda g: (g["conf"] != "proven", -max(g["pct"], g["got_pct"])))
+    breakdown = None
+    if full:
+        # where 100% of the supply sits now: every token is in exactly one bucket
+        B = defaultdict(float)
+        for h in hold.values():
+            if h["bal"] > 0 and h["kind"] != "wallet":
+                B[{"pool": "pools / markets", "token contract": "contracts"}.get(h["kind"], h["kind"] + "s")] += h["pct"]
+        gof = {}
+        for g in groups:
+            for a in g["members"]:
+                gof.setdefault(a, g)
+        nfresh = napp = nind = 0
+        for h in wallets:
+            if h["bal"] <= 0:
+                continue
+            g = gof.get(h["addr"])
+            f = h.get("first") or {}
+            if g and g["dev"]:
+                k = "dev-linked groups"
+            elif g:
+                k = f"{g['conf']} groups (one owner per group)"
+            elif h.get("sponsored"):
+                k = "app accounts (gas-sponsored, never funded), unlinked"; napp += 1
+            elif h.get("fund_ts") and f.get("ts") and 0 <= f["ts"] - h["fund_ts"] <= 3600:
+                k = "funded under 1 h before their first token, unlinked"; nfresh += 1
+            else:
+                k = "independent wallets (no link found)"; nind += 1
+            B[k] += h["pct"]
+            h["bucket"] = k
+        known = sum(B.values())
+        n_dust = sum(1 for a, v in bal.items() if 0 < v < supply0 * TAIL_MIN and a not in skip)
+        B[f"dust wallets under 0.01% each ({n_dust}, not checked)"] += max(0.0, 100 - known)
+        breakdown = {"buckets": sorted(B.items(), key=lambda kv: -kv[1]), "n_checked": len([h for h in wallets if h["bal"] > 0]),
+                     "n_tail": len(tail_w), "n_dust": n_dust}
 
     # --- possible links (not merged): same exchange within 30 min, same block at launch
     possible = []
     d_kind = lambda f: fk.get(f, {}).get("kind", "?")
     ex_f = defaultdict(list)
     for h in wallets:
-        if h["funder"] and fk[h["funder"]]["kind"] not in ("wallet", "payout service") and not h.get("bridge") and h["fund_ts"]:
+        if h["funder"] and fk[h["funder"]]["kind"] not in ("wallet", "payout service") and not h.get("bridge") and h["fund_ts"] \
+                and h["addr"] not in tail_set:
             ex_f[h["funder"]].append(h)
     for f, hs in ex_f.items():
         hs.sort(key=lambda h: h["fund_ts"])
@@ -534,6 +606,7 @@ async def collect(chain, token, top=25, profile=20):
                              "pct": sum(hold[a]["pct"] for a in [dv] + [h["addr"] for h in near]),
                              "got_pct": sum(hold[a]["got_pct"] for a in [dv] + [h["addr"] for h in near])})
     for r, ws in by_relayer.items():
+        ws = [w for w in ws if w not in tail_set]
         if len(ws) > 1:
             possible.append({"kind": f"first buy sent through the same relayer / trading-bot service ({sk[r]:,} txs): users of one service, not proof of one owner",
                              "via": r, "members": ws, "pct": sum(hold[a]["pct"] for a in ws), "got_pct": sum(hold[a]["got_pct"] for a in ws)})
@@ -554,7 +627,7 @@ async def collect(chain, token, top=25, profile=20):
             "mcap": pair0.get("marketCap") or pair0.get("fdv"), "liq": (pair0.get("liquidity") or {}).get("usd"),
             "n_transfers": len(rows), "n_holders": sum(1 for a, v in bal.items() if v > 0 and a not in skip), "n_ever": sum(1 for a in act if a not in skip), "pools": sorted(pools), "markets": markets,
             "hold": sorted(hold.values(), key=lambda h: -h["bal"]), "wallets": wallets, "funders": fk, "groups": groups,
-            "possible": possible, "notes": notes, "timing": timing}
+            "possible": possible, "notes": notes, "timing": timing, "full": full, "breakdown": breakdown}
     if profile:
         t = time.time()
         from lib import wprofile
@@ -734,4 +807,64 @@ def render_deep(d, notes, secs):
         L.append("NOT CHECKED / NOTES (profiles)")
         L += [f"   - {x}" for x in notes[:25]]
     L.append(f"   (deep profiles: {n} wallets, {secs:.1f}s)")
+    return "\n".join(L)
+
+
+def render_full(d, deep=None):
+    """The ALL HOLDERS section: every wallet >= 0.01% of supply checked, linked groups across the whole holder base.
+    deep = the quick-pass result after wprofile ran: its same-coin clusters (top 20 only) move wallets out of 'independent'."""
+    if d.get("error"):
+        return f"== ALL HOLDERS: {d['error']}"
+    b = dict(d.get("breakdown") or {})
+    cl = [set(c["who"]) for c in ((deep or {}).get("shared") or {}).get("clusters") or []]
+    if cl and b.get("buckets"):
+        ing = {a for g in d["groups"] for a in g["members"]}
+        move = {a for c in cl for a in c} - ing
+        byw = {h["addr"]: h for h in d["wallets"]}
+        buckets = dict(b["buckets"])
+        moved = 0.0
+        for a in move:
+            h = byw.get(a)
+            if h and h["bal"] > 0 and h.get("bucket") in buckets:
+                buckets[h["bucket"]] = max(0.0, buckets[h["bucket"]] - h["pct"])
+                moved += h["pct"]
+        if moved:
+            buckets["same-coin clusters (copy-trade / one trader, top 20 only)"] = moved
+            b["buckets"] = sorted(buckets.items(), key=lambda kv: -kv[1])
+    hw = sorted([h for h in d["wallets"] if h["bal"] > 0 and ("holder" in h["roles"] or "small holder" in h["roles"])], key=lambda h: -h["bal"])
+    rank = {h["addr"]: i for i, h in enumerate(hw, 1)}
+    by = {h["addr"]: h for h in d["wallets"]}
+    L = ["", f"== ALL HOLDERS: {b.get('n_checked', 0)} wallets checked (every wallet with >= 0.01% of supply), "
+             f"{b.get('n_dust', 0)} dust wallets below that"]
+    L.append("SUPPLY 100%  " + " · ".join(f"{k} {v:.1f}%" for k, v in b.get("buckets", []) if v >= 0.05))
+    G = sorted([g for g in d["groups"] if g["pct"] >= 0.1 or g["got_pct"] >= 0.5], key=lambda g: (g["pct"] < 0.05, g["conf"] != "proven", -g["pct"], -g["got_pct"]))
+    rest = [g for g in d["groups"] if g not in G]
+    L.append(f"LINKED GROUPS ACROSS ALL HOLDERS  {len(d['groups'])} group(s) hold {sum(g['pct'] for g in d['groups']):.1f}% now"
+             + (f" ({len(rest)} tiny ones under 0.1% not listed, {sum(g['pct'] for g in rest):.2f}%)" if rest else ""))
+    for i, g in enumerate(G, 1):
+        m = [a for a in g["members"] if a in by]
+        top = [a for a in m if rank.get(a, 999) <= 25]
+        small = [a for a in m if a not in top]
+        L.append(f" A{i} [{g['conf'].upper()}]  {len(m) + g['unprofiled']} wallets · holds {g['pct']:.2f}% now · took in {g['got_pct']:.2f}%"
+                 f" · sold {g['sold_pct']:.2f}%" + ("  ** INCLUDES THE DEV **" if g["dev"] else "")
+                 + (f"  includes top holder(s) {', '.join('#%d' % rank[a] for a in top)}" if top else "  (no top-25 wallet: hidden in the small holders)"))
+        for a in sorted(m, key=lambda a: -by[a]["bal"])[:6]:
+            h = by[a]
+            L.append(f"     {('#%d' % rank[a]) if a in rank else '  -'} {a}  now {h['pct']:.2f}% · got {h['got_pct']:.2f}%"
+                     + (" · sold %.0f%%" % (100 * h["sold"] / max(1, h["bought"] + h["received"] + h["minted"])) if h["sold"] else ""))
+        if len(m) > 6:
+            L.append(f"     … +{len(m) - 6} more wallets holding {sum(by[a]['pct'] for a in sorted(m, key=lambda a: -by[a]['bal'])[6:]):.2f}%")
+        for w in g["why"][:4]:
+            L.append(f"     - {w}")
+        if len(g["why"]) > 4:
+            L.append(f"     - … {len(g['why']) - 4} more links")
+    bl = [p for p in d["possible"] if p["kind"].startswith("first buy in the same block") or p["kind"].startswith("funded by the dev")]
+    if bl:
+        L.append("POSSIBLE (all holders)")
+        for p in bl:
+            L.append(f"   {len(p['members'])} wallets, {p['pct']:.2f}% now / {p['got_pct']:.2f}% taken in: {p['kind']}")
+    miss = [n for n in d["notes"] if n.startswith("funder of ") and " not found" in n]
+    if miss:
+        L.append(f"   funder not found for {len(miss)} wallet(s) (they can't be linked by funding)")
+    L.append(f"   ({d['secs']}s: " + ", ".join(f"{k} {v}s" for k, v in d["timing"].items()) + ")")
     return "\n".join(L)

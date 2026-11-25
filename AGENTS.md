@@ -58,7 +58,7 @@ owner-only functions and says "ask for dd sim to confirm".
 | Deep check (stateful sell tests: delayed honeypot, sell caps, funds taken) — ONLY when asked | `dd check <chain> <token> --deep` or `dd sell <chain> <token>` |
 | What does this ONE function really do (read the code) | `dd code <chain> <address> <function>` (name, signature or selector; `--from 0x..` `--args a,b` to choose caller/args; works on proxies and hooks) |
 | Where did a wallet's money come from | `dd trace <chain> <wallet>` |
-| Who holds it / wallet analysis / bundles / "analyse the holders" | `dd holders <chain> <token>` (quick pass then deep profiles; `--fast` quick only, `--top N`, `--json`) — then write the deep analysis yourself (see HOLDERS below) |
+| Who holds it / wallet analysis / bundles / "analyse the holders" | `dd holders <chain> <token>` (quick pass, then deep profiles + ALL HOLDERS (every wallet >= 0.01%); `--fast` quick only, `--top N`, `--json`) — then write the deep analysis yourself (see HOLDERS below) |
 | Anything else (old toolkit) | `dd <chain> token|audit|cast|rpc|fork|wallet` |
 
 `dd check` covers: functions (bytecode → names → risky/unknown), who can call each privileged function
@@ -149,10 +149,22 @@ reached 3+ wallets'. Busy BSC degens share many trending coins: plain overlap al
 SPEED (2026-11-25): `dd holders` prints a QUICK PASS first (~7-12 s: supply, links, possible links, top holders, big buyers
 who left, dev) and then DEEP PROFILES (~25-35 s more: shared coins/clusters + each wallet's profile); `--fast` = quick pass only.
 Answer the user from the quick pass right away when they are waiting, then follow up with the deep part. Other-chain history
-starts as soon as tx counts are in. FUNDERS where the explorer can't list wallets (bsc/base/rh free key): lib/nodefund.py
-binary-searches our archive node (first nonce > 0, then first balance > dust before it; the tx from the block, or the block's
-call trace for contract payouts) -> no HyperSync, results cached forever; busy funders (>= 1,000 txs) there are treated as
-services (their payouts can't be listed). Fundings < 1e-6 native are app 'activation' markers and are ignored.
+starts as soon as tx counts are in. FUNDERS where the explorer can't list wallets (bsc/base/rh free key) and for ALL small
+holders on any chain with a private node: lib/nodefund.py runs ONE binary search on our archive node (first block where
+nonce > 0 OR balance > dust: monotone), then the tx from that block; a nonce that went up with no own tx and no BNB = an
+EIP-7702 smart-wallet account an app's relayer set up ('app account', never funded, gas sponsored); else the block's call trace
+(contract payouts) -> no HyperSync, results cached forever; busy funders (>= 1,000 txs) there are treated as services
+(their payouts can't be listed). Fundings < 1e-6 native are app 'activation' markers and are ignored. Cost: ~2 node calls x
+27 steps per wallet (Chainstack ~420 calls/s): ~40 s per 300 new wallets, 0 s once cached.
+ALL HOLDERS (2026-11-25, user: "the analysis should be on the 100 percent", not just the top wallets): the deep phase also
+runs collect(full=True) in parallel with the profiles: EVERY wallet with >= 0.01% of supply (~99% of what wallets hold; the
+rest is dust, counted) gets funder + 2nd hop + buy signer + token-transfer links -> 'A' groups across the whole holder base,
+flagged 'includes top holder #N' or 'hidden in the small holders', and SUPPLY 100% = where every token sits now (pools,
+contracts, dev-linked, proven/likely groups, same-coin clusters (top 20), gas-sponsored app accounts (unlinkable by funding),
+funded < 1 h before first token, independent, dust). New PROVEN link: one BUY tx delivered tokens to 2-30 holders (bundle
+buy; fee/referral cuts < 10% of the biggest share are ignored). Cold run on ~600 holders: ~1.5-2.5 min; cached reruns faster.
+Same-coin (copy-trade) clusters still cover only the top 20: app accounts (~25% of supply on four.meme/Flap coins) stay
+unlinked unless they're in the top 20.
 REAL-BUY CHECK (wprofile._is_buy / _real_buys, 2026-11-25): disperse bots spray fake coins to hundreds of wallets per tx
 (mihao/FLOAT on BSC: 317 recipients in one tx), which looked like 'shared coins bought together'. A wallet+coin counts only
 if its first tx of that coin shows the wallet PAYING: a V2/V3/PancakeV3/V4 Swap or WBNB/WETH Deposit in the receipt, another
