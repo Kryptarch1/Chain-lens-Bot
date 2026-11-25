@@ -595,6 +595,11 @@ async def shared_coins(d, targets):
     out.sort(key=lambda x: (-x["similar"], x["popular"], -x["together"], -x["n10"], -x["n20"], x["tight"] if x["tight"] is not None else 9e9))
     # wallet pairs that keep buying the same SMALL coins (big popular coins say nothing), often within minutes
     shared, tog = Counter(), Counter()
+    # this token's own first buys count as one more shared event (two wallets buying it seconds apart is evidence too)
+    me = {h["addr"]: (h.get("first") or {}).get("ts") for h in hs if (h.get("first") or {}).get("kind") == "bought"}
+    by[(d["chain"], d["token"])] = {a: t for a, t in me.items() if t}
+    meta[(d["chain"], d["token"])] = {"symbol": d.get("symbol"), "state": "this token", "mcap": None}
+    ncoins = {h["addr"]: len((h["profile"].get("coin_list") or [])) for h in hs}
     for k, w in by.items():
         m = meta[k]
         if (m.get("symbol") or "").upper() in BORING or ((m.get("mcap") or 0) >= 20e6 and m.get("state") == "alive"):
@@ -604,11 +609,14 @@ async def shared_coins(d, targets):
             for j in range(i + 1, len(ws)):
                 a, b = ws[i], ws[j]
                 shared[a, b] += 1
-                if w[a] and w[b] and abs(w[a] - w[b]) <= 600:
+                # this token: launches pack buyers into minutes, so only buys <= 60 s apart count as 'together'
+                if w[a] and w[b] and abs(w[a] - w[b]) <= (60 if k == (d["chain"], d["token"]) else 600):
                     tog[a, b] += 1
     # sharing many trending coins is normal for busy degens (it chained 13 of 20 wallets on a BSC meme), so a pair needs
     # >= 2 small coins bought within 10 min of each other
-    strong = [(a, b) for (a, b), n in shared.items() if tog[a, b] >= 2 and n >= 3]
+    # quiet wallets (<= 10 real coins in the window) sharing 2 rare picks bought together count too
+    strong = [(a, b) for (a, b), n in shared.items()
+              if tog[a, b] >= 2 and (n >= 3 or (ncoins.get(a, 99) <= 10 and ncoins.get(b, 99) <= 10))]
     crowd = sum(1 for n in shared.values() if n >= 5)
     par = {}
     def f(x):

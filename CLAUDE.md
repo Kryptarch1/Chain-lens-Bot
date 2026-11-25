@@ -158,6 +158,8 @@ REAL-BUY CHECK (wprofile._is_buy / _real_buys, 2026-11-25): disperse bots spray 
 if its first tx of that coin shows the wallet PAYING: a V2/V3/PancakeV3/V4 Swap or WBNB/WETH Deposit in the receipt, another
 token sent out by the wallet, or a launchpad curve (Flap portal, four.meme) in the tx. Applied to shared coins/clusters (all
 chains) and to the 30-day BSC/Base/RH log coins (76% were spray on 莫达). Known real buys of the token itself all pass.
+CLUSTER pairs also count THIS token's first buys when <= 60 s apart, and two quiet wallets (<= 10 real coins in the window)
+qualify with 2 shared picks bought together (龟币: #2/#3 = 2 coins, near-dormant, 14 s apart on this token).
 USER RULE (2026-11-25): every point must be (1) non-obvious (not what GMGN's holder tab shows), (2) backed by specific evidence,
 (3) say what it means for the trade. Model = hidden pairs among current holders as one combined holder (% now, evidence,
 PROVEN vs copy-trade). Generic lines (dev sold, snipers exited, 'a crowd', 'mid quality') without a consequence = fluff.
