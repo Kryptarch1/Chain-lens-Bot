@@ -831,7 +831,7 @@ def render_full(d, deep=None):
         if moved:
             buckets["same-coin clusters (copy-trade / one trader, top 20 only)"] = moved
             b["buckets"] = sorted(buckets.items(), key=lambda kv: -kv[1])
-    hw = sorted([h for h in d["wallets"] if h["bal"] > 0 and ("holder" in h["roles"] or "small holder" in h["roles"])], key=lambda h: -h["bal"])
+    hw = sorted([h for h in d["wallets"] if h["bal"] > 0], key=lambda h: -h["bal"])
     rank = {h["addr"]: i for i, h in enumerate(hw, 1)}
     by = {h["addr"]: h for h in d["wallets"]}
     L = ["", f"== ALL HOLDERS: {b.get('n_checked', 0)} wallets checked (every wallet with >= 0.01% of supply), "
