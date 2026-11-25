@@ -201,7 +201,7 @@ async def first_funding(chain, addr):
         return {"error": _clean(e)[:80]}
     for x in rows:
         if (x.get("asset") in (None, "ETH", "BNB") or x.get("category") in ("external", "internal")) and _raw(x) / 1e18 >= DUST:
-            r = {"from": (x.get("from") or "").lower(), "tx": x.get("hash"), "time": str(_ts(x) or 0)}
+            r = {"from": (x.get("from") or "").lower(), "tx": x.get("hash"), "time": str(_ts(x) or 0), "value": _raw(x) / 1e18}
             if x.get("category") == "internal":
                 r["internal"] = True
             return r

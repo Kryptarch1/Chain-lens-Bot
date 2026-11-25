@@ -7,7 +7,7 @@ Facts only (the written analysis is done on top of this output):
   4. links: same funder, funder is another holder, same bridge origin, same buy signer, tokens passed between holders
      ('proven' = on-chain fact); same exchange within 30 min and same launch block are listed as 'possible'
 """
-import asyncio, time
+import asyncio, re, time
 from collections import defaultdict, Counter
 from datetime import datetime
 from lib.rpc import RPC, ZERO, DEAD, TRANSFER, topic_addr
@@ -48,6 +48,7 @@ def replay(rows, pools):
     the liquidity being seeded, not a sale."""
     bal = defaultdict(int)
     act = defaultdict(lambda: {"bought": 0, "sold": 0, "received": 0, "sent": 0, "minted": 0, "seeded": 0, "buys": 0, "sells": 0,
+                               "lp_added": 0, "lp_removed": 0, "sell_txs": [], "buy_txs": [],
                                "first": None, "first_buy": None, "last_block": 0, "recv_from": Counter(), "sent_to": Counter()})
     txs, order = defaultdict(list), []
     for r in rows:
@@ -76,7 +77,7 @@ def replay(rows, pools):
                     if r["to"] == a:
                         srcs[r["from"]] += r["v"]
                 if pool_d < 0:
-                    kind = "bought"; x["bought"] += d; x["buys"] += 1
+                    kind = "bought"; x["bought"] += d; x["buys"] += 1; x["buy_txs"].append((tx, d))
                     if not x["first_buy"]:
                         x["first_buy"] = {"block": blk, "tx": tx, "amount": d}
                 elif set(srcs) == {ZERO}:
@@ -93,13 +94,62 @@ def replay(rows, pools):
                 if pool_d > 0 and start is None:
                     x["seeded"] += -d
                 elif pool_d > 0:
-                    x["sold"] += -d; x["sells"] += 1
+                    x["sold"] += -d; x["sells"] += 1; x["sell_txs"].append((tx, -d))
                 else:
                     x["sent"] += -d
                     for r in items:
                         if r["from"] == a and r["to"] not in pools:
                             x["sent_to"][r["to"]] += r["v"]
     return bal, act, start
+
+
+LP_ADD = {"0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f",   # V2 Mint
+          "0x7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde"}   # V3 / PancakeV3 Mint
+LP_REMOVE = {"0xdccd412f0b1252819cb1fd330b93224ca42612892bb3f4f789976e6d81936496",  # V2 Burn
+             "0x0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67e028cd568da98982c"}  # V3 / PancakeV3 Burn
+V4_MODIFY = "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec"   # V4 ModifyLiquidity (delta sign = add/remove)
+
+
+async def lp_moves(rpc, act, cap=600):
+    """The replay calls tokens going INTO a pool a sell and tokens coming OUT a buy. Adding liquidity / pulling it
+    looks the same, so a dev who opens a second pool at a made-up price reads as 'sold 11%', and an LP pull as a buy.
+    Re-read those txs' receipts: a Mint / Burn / V4 ModifyLiquidity in the tx -> liquidity added / removed."""
+    want = []
+    for a, x in act.items():
+        want += [t for t, _ in x["sell_txs"]] + [t for t, _ in x["buy_txs"]]
+    want = sorted(set(want))[:cap]
+    if not want:
+        return 0
+    try:
+        rc = await rpc.batch([("eth_getTransactionReceipt", [t]) for t in want])
+    except Exception:
+        return 0
+    add, rem = set(), set()
+    for t, r in zip(want, rc):
+        for lg in (r or {}).get("logs") or []:
+            t0 = (lg.get("topics") or [None])[0]
+            if t0 in LP_ADD:
+                add.add(t)
+            elif t0 in LP_REMOVE:
+                rem.add(t)
+            elif t0 == V4_MODIFY:
+                d = lg.get("data") or "0x"
+                w = d[2 + 128:2 + 192]  # 3rd word: liquidityDelta (int256)
+                if w:
+                    (rem if int(w[0], 16) >= 8 else add).add(t)
+    n = 0
+    for a, x in act.items():
+        for t, v in x["sell_txs"]:
+            if t in add:
+                x["sold"] -= v; x["sells"] -= 1; x["lp_added"] += v; n += 1
+        for t, v in x["buy_txs"]:
+            if t in rem:
+                x["bought"] -= v; x["buys"] -= 1; x["lp_removed"] += v; n += 1
+                if x["first"] and x["first"]["tx"] == t:
+                    x["first"]["kind"] = "removed liquidity"
+                if x["first_buy"] and x["first_buy"]["tx"] == t:
+                    x["first_buy"] = None
+    return n
 
 
 async def find_markets(rpc, rows, pools, n=20):
@@ -118,6 +168,11 @@ async def find_markets(rpc, rows, pools, n=20):
         if c and c != "0x" and delegation_7702(c) is None:
             out.append(a)
     return out
+
+
+def _reach(reason):
+    m = re.search(r"for (\d+) holders|to (\d+) holders|^(\d+) wallets sent", reason)
+    return int(next(g for g in m.groups() if g)) if m else 0
 
 
 class Links:
@@ -179,6 +234,8 @@ async def collect(chain, token, top=25, profile=20, full=False):
     markets = await find_markets(rpc, rows, pools)
     pools |= set(markets)
     bal, act, start = replay(rows, pools)
+    if await lp_moves(rpc, act):
+        notes.append("liquidity adds / pulls by wallets are shown as such, not as sells / buys")
     sym = rpc.cfg.get("symbol", "ETH")
     dec = info.get("decimals") or 18
 
@@ -300,7 +357,7 @@ async def collect(chain, token, top=25, profile=20, full=False):
             left = []
             for a, x in zip(miss, al):
                 if x.get("from"):
-                    res[a] = {k: x[k] for k in ("from", "tx", "time", "internal") if k in x}
+                    res[a] = {k: x[k] for k in ("from", "tx", "time", "internal", "value") if k in x}
                     cache.set(f"funded:{chain}:{a}", res[a], ttl=None)
                 elif x.get("none"):
                     res[a] = {"sponsored": True}
@@ -320,7 +377,7 @@ async def collect(chain, token, top=25, profile=20, full=False):
             for a in miss:
                 x = nf.get(a) or {"error": "missing"}
                 if x.get("from"):
-                    res[a] = {k: x[k] for k in ("from", "tx", "time", "internal") if k in x}
+                    res[a] = {k: x[k] for k in ("from", "tx", "time", "internal", "value") if k in x}
                     cache.set(f"funded:{chain}:{a}", res[a], ttl=None)
                 elif x.get("none"):
                     res[a] = {"sponsored": True} if x.get("sponsored") else {}
@@ -344,7 +401,7 @@ async def collect(chain, token, top=25, profile=20, full=False):
         x = act[a]
         h["nonce"] = int(nb[i], 16) if nb[i] else None
         h["native"] = int(nb[len(W) + i], 16) / 1e18 if nb[len(W) + i] else None
-        h.update({k: x[k] for k in ("bought", "sold", "received", "sent", "minted", "seeded", "buys", "sells")})
+        h.update({k: x[k] for k in ("bought", "sold", "received", "sent", "minted", "seeded", "buys", "sells", "lp_added", "lp_removed")})
         h["recv_from"] = dict(x["recv_from"].most_common(4)); h["sent_to"] = dict(x["sent_to"].most_common(4))
         h["n_recv_from"], h["n_sent_to"] = len(x["recv_from"]), len(x["sent_to"])
         f = x["first"]
@@ -357,6 +414,7 @@ async def collect(chain, token, top=25, profile=20, full=False):
         fb = fund[i] or {}
         h["funder"] = (fb.get("from") or "").lower() or None
         h["fund_tx"], h["fund_ts"] = fb.get("tx"), _ts(fb.get("time"))
+        h["fund_internal"], h["fund_value"] = bool(fb.get("internal")), fb.get("value")
         if fb.get("sponsored"):
             h["sponsored"] = True  # never held native coin before its first tx: an app's gas-sponsored / smart-wallet account
         elif fb.get("error") or not fb:
@@ -403,7 +461,9 @@ async def collect(chain, token, top=25, profile=20, full=False):
     ftx = {x: t for x, t in zip(fund_txs, ftx or []) if t}
     for h in wallets:
         fx = ftx.get(h.get("fund_tx"))
-        h["fund_amt"] = int(fx["value"], 16) / 1e18 if fx else None
+        # what THIS wallet got: a contract payout (internal) is not the tx's value (one tx can fund 40 wallets)
+        h["fund_amt"] = h["fund_value"] if h.get("fund_value") is not None else \
+            (int(fx["value"], 16) / 1e18 if fx and not h.get("fund_internal") else None)
         h["fund_block"] = int(fx["blockNumber"], 16) if fx else None
         if h["fund_amt"] is not None and h["fund_amt"] < 1e-6:
             # dust 'activation' sends (1e-18 BNB from an app's service wallet) are markers, not funding or wallet age
@@ -503,6 +563,25 @@ async def collect(chain, token, top=25, profile=20, full=False):
     for f, ws in by_f.items():
         for w in ws[1:]:
             L.join(ws[0], w, f"same first funder {f} ({fk[f]['nonce']} txs)")
+    # one tx paid the first native coin to several holders (a disperse / one-shot-contract funding: each wallet gets a
+    # payout from a different throwaway contract, so 'same funder' misses it). An exchange batch withdrawal also pays many
+    # strangers in one tx -> only when the tx's signer is not a busy service.
+    by_ftx = defaultdict(list)
+    for h in wallets:
+        if h.get("fund_tx") and h.get("funder"):
+            by_ftx[h["fund_tx"]].append(h["addr"])
+    multi = {t: ws for t, ws in by_ftx.items() if len(ws) >= 2}
+    if multi:
+        fs = await rpc.batch([("eth_getTransactionByHash", [t]) for t in multi])
+        signer = {t: (x or {}).get("from", "").lower() for t, x in zip(multi, fs)}
+        sg = sorted({v for v in signer.values() if v})
+        sn = await rpc.batch([("eth_getTransactionCount", [v, "latest"]) for v in sg]) if sg else []
+        sn = {v: int(n or "0x0", 16) for v, n in zip(sg, sn)}
+        for t, ws in multi.items():
+            if signer.get(t) and sn.get(signer[t], 0) < 1000:
+                for w in ws[1:]:
+                    L.join(ws[0], w, f"first {sym} for {len(ws)} holders came in ONE tx {t} signed by {signer[t]} "
+                                     f"({sn[signer[t]]} txs): one wallet funded them all")
     # one BUY tx delivered tokens to several holders = one wallet paid for all of them (a bundle buy). An airdrop
     # (no buy) to many wallets is not proof: disperse bots and promo drops hit strangers.
     by_tx = defaultdict(list)
@@ -563,7 +642,9 @@ async def collect(chain, token, top=25, profile=20, full=False):
 
     def group(g, conf):
         gs = set(g)
-        why = sorted({r for pair, rs in L.why.items() if pair <= gs for r in rs})
+        # reasons that tie MANY wallets together first (one funding tx for 43 holders, a bundle buy, a collector):
+        # alphabetical order buried the one line that explained a 68-wallet group under '47 more links'
+        why = sorted({r for pair, rs in L.why.items() if pair <= gs for r in rs}, key=lambda r: (-_reach(r), r))
         extra = {s for a in g for s in act[a]["recv_from"] if s not in gs and s not in skip and s in feeders and "collector" in hold[a]["roles"]}
         inside = gs | extra
         # what the group took in from outside itself: buys, mints, and tokens received from non-members
@@ -739,7 +820,9 @@ def _wallet_lines(d, h, n=None):
              f"minted {q(h['minted']):,.0f}" if h["minted"] else None,
              f"sold {q(h['sold']):,.0f} in {h['sells']} sell(s) = {100 * h['sold'] / got:.0f}% of what it got" if h["sells"] and got else "sold nothing",
              f"sent out {q(h['sent']):,.0f} to {h['n_sent_to']} address(es)" if h["sent"] else None,
-             f"seeded liquidity {q(h['seeded']):,.0f}" if h["seeded"] else None]
+             f"seeded liquidity {q(h['seeded']):,.0f}" if h["seeded"] else None,
+             f"ADDED LIQUIDITY {q(h['lp_added']):,.0f} (its own pool position, not a sell)" if h.get("lp_added") else None,
+             f"PULLED LIQUIDITY {q(h['lp_removed']):,.0f}" if h.get("lp_removed") else None]
     L.append("     " + " · ".join(p for p in parts if p))
     if f.get("signer") and f["signer"] != h["addr"]:
         n = f.get("signer_txs")

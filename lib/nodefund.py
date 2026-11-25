@@ -91,7 +91,7 @@ async def first_funding_many(chain, addrs, nonces, balances, latest, max_trace=1
         own = [t for t in txs if (t.get("from") or "").lower() == a]
         if hit:
             t = hit[0]
-            out[a] = {"from": t["from"].lower(), "tx": t["hash"], "time": str(ts), "block": b}
+            out[a] = {"from": t["from"].lower(), "tx": t["hash"], "time": str(ts), "block": b, "value": _int(t.get("value") or "0x0") / 1e18}
         elif own and not any((_int(t.get("gasPrice") or "0x0") or 0) > 0 for t in own[:1]):
             # its first tx paid 0 gas (a sponsored / gasless app account): nobody funded it
             out[a] = {"none": True, "sponsored": True}
@@ -120,7 +120,8 @@ async def first_funding_many(chain, addrs, nonces, balances, latest, max_trace=1
             if c:
                 txs = blk.get("transactions") or []
                 h = (x or {}).get("txHash") or (txs[i]["hash"] if i < len(txs) else None)
-                return a, {"from": (c.get("from") or "").lower(), "tx": h, "time": str(ts), "block": b, "internal": True}
+                return a, {"from": (c.get("from") or "").lower(), "tx": h, "time": str(ts), "block": b, "internal": True,
+                           "value": (_int(c.get("value") or "0x0") or 0) / 1e18}
         if any((t.get("from") or "").lower() == a for t in blk.get("transactions") or []):
             # signed its first tx in that block with no BNB coming in first: gas paid by someone else's bundle
             return a, {"none": True, "sponsored": True}

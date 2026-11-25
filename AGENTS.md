@@ -179,6 +179,14 @@ RELATIVE to activity (m = coins the less active wallet traded): >= 3 within 60 s
 them. Pairs with dozens of coins bought within 60 s (e.g. 116 of 132) are one operator. Timing: cold ~350 holders ~1.5-3 min,
 ~600 holders ~5 min for the ALL HOLDERS section (quick pass ~10 s and deep profiles ~35-50 s still print first); histories cached
 30 min, funders forever.
+ONE FUNDING TX + LP MOVES (2026-11-25, 'zero' on bsc: 26 separate groups were really ONE 95% operator): (1) PROVEN link
+"first BNB for N holders came in ONE tx" — a bundler funds 40+ fresh wallets in one tx through a throwaway contract each, so
+'same funder' misses it; skipped when the tx signer has >= 1,000 txs (exchange batch withdrawals pay strangers). Group reasons
+are listed widest first (a reason tying N wallets before pair lines). (2) Funding amounts are what THAT wallet got (the
+internal payout value), not the tx's total (was printing '172.5 BNB' for every wallet). (3) The replay re-reads sell/buy tx
+receipts: a V2/V3 Mint or V4 ModifyLiquidity(+) = ADDED LIQUIDITY, Burn / ModifyLiquidity(-) = PULLED LIQUIDITY, not a sell /
+buy. Watch for insiders opening a 2nd pool at a made-up price (zero: 633k tokens + $9k USDT in a Pancake v3 pool -> GMGN showed
+$13.5M mcap while the Flap curve said $39k) — compare the pools' prices and real quote liquidity before trusting mcap.
 TRACKED WALLETS (2026-11-25): the user's private list (KOLs, hunters, insiders; 118 at start) is data/tracked.json — data/
 is never pushed, keep it that way. `dd tracked list [text] | add <0x> <label> | rm <0x>`. `dd holders` gives every tracked
 wallet that ever held the token a full profile and prints YOUR TRACKED WALLETS (holds % / rank, sold, when + paid, linked
