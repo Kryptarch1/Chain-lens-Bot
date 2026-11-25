@@ -153,8 +153,9 @@ starts as soon as tx counts are in. FUNDERS where the explorer can't list wallet
 binary-searches our archive node (first nonce > 0, then first balance > dust before it; the tx from the block, or the block's
 call trace for contract payouts) -> no HyperSync, results cached forever; busy funders (>= 1,000 txs) there are treated as
 services (their payouts can't be listed). Fundings < 1e-6 native are app 'activation' markers and are ignored.
-USER VALUES MOST (2026-11-25): HIDDEN PAIRS among CURRENT holders, each shown as one combined holder (links, combined % now,
-one line of hard evidence, PROVEN vs copy-trade), ranked by %. Dev-dumped / snipers-exited / crowd / smart-money / sellers = low value.
+USER RULE (2026-11-25): every point must be (1) non-obvious (not what GMGN's holder tab shows), (2) backed by specific evidence,
+(3) say what it means for the trade. Model = hidden pairs among current holders as one combined holder (% now, evidence,
+PROVEN vs copy-trade). Generic lines (dev sold, snipers exited, 'a crowd', 'mid quality') without a consequence = fluff.
 ANSWER FORMAT (user rules): wallets only, no safety lines; EVERY wallet is a clickable explorer link; overview of the
 verdict on the holder base first, then ONLY high-impact findings (clusters, smart money vs bots, sellers, wallets to
 watch) one line each; NO buy mechanics (relayer, position, routers, tx counts, dust funding) unless it changes the conclusion.
