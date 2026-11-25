@@ -187,6 +187,11 @@ internal payout value), not the tx's total (was printing '172.5 BNB' for every w
 receipts: a V2/V3 Mint or V4 ModifyLiquidity(+) = ADDED LIQUIDITY, Burn / ModifyLiquidity(-) = PULLED LIQUIDITY, not a sell /
 buy. Watch for insiders opening a 2nd pool at a made-up price (zero: 633k tokens + $9k USDT in a Pancake v3 pool -> GMGN showed
 $13.5M mcap while the Flap curve said $39k) — compare the pools' prices and real quote liquidity before trusting mcap.
+DEEP CLUSTER RULE (2026-11-25, GREM on rh): the top-20 CLUSTER (wprofile.shared_coins) now uses the SAME activity-relative
+pair rule as the all-holder scan (tight >= 3 and >= 10% of m, or tog >= 3 and >= 25% of m, or tog >= 2 with m <= 10), with m =
+coins the wallet traded on EVERY chain read (home-only counts were 0 on rh/arc and made busy base/bsc degens look quiet). Penguin:
+the old rule chained 11 wallets into '12%'; the new one keeps only #12+#16 (188 of 195 coins within 10 min). Tracked-wallet rank
+is now among ALL holding wallets (the quick pass said #26 for a #50 wallet).
 TRACKED WALLETS (2026-11-25): the user's private list (KOLs, hunters, insiders; 118 at start) is data/tracked.json — data/
 is never pushed, keep it that way. `dd tracked list [text] | add <0x> <label> | rm <0x>`. `dd holders` gives every tracked
 wallet that ever held the token a full profile and prints YOUR TRACKED WALLETS (holds % / rank, sold, when + paid, linked

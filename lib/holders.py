@@ -747,7 +747,13 @@ async def collect(chain, token, top=25, profile=20, full=False):
     # --- the user's tracked wallets: in this token, funding a holder, or inside a group / same-coin cluster
     tr_rows = []
     by_w = {h["addr"]: h for h in wallets}
-    rank_now = {h["addr"]: i for i, h in enumerate(sorted([h for h in wallets if h["bal"] > 0], key=lambda h: -h["bal"]), 1)}
+    # rank among EVERY holding wallet (the quick pass checks only the top + movers, so ranking inside `wallets` said #26
+    # for a wallet that is really #50); pools, contracts and burns don't take a rank
+    not_w = {a for a, x in hold.items() if x["kind"] != "wallet"} | pools | {ZERO, DEAD}
+    allbal = sorted((v for a, v in bal.items() if v > 0 and a not in not_w), reverse=True)
+    import bisect
+    neg = [-v for v in allbal]
+    rank_now = {h["addr"]: bisect.bisect_left(neg, -h["bal"]) + 1 for h in wallets if h["bal"] > 0}
     gidx = {a: (i, g) for i, g in enumerate(groups, 1) for a in g["members"]}
     cidx = {a: (i, c) for i, c in enumerate(((net or {}).get("clusters") or []), 1) for a in c["who"]}
     for a, lab in trk.items():

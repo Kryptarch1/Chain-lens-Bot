@@ -597,12 +597,14 @@ async def shared_coins(d, targets):
         x["together"] = x["tight"] is not None and x["tight"] <= 600
     out.sort(key=lambda x: (-x["similar"], x["popular"], -x["together"], -x["n10"], -x["n20"], x["tight"] if x["tight"] is not None else 9e9))
     # wallet pairs that keep buying the same SMALL coins (big popular coins say nothing), often within minutes
-    shared, tog = Counter(), Counter()
+    shared, tog, tight = Counter(), Counter(), Counter()
     # this token's own first buys count as one more shared event (two wallets buying it seconds apart is evidence too)
     me = {h["addr"]: (h.get("first") or {}).get("ts") for h in hs if (h.get("first") or {}).get("kind") == "bought"}
     by[(d["chain"], d["token"])] = {a: t for a, t in me.items() if t}
     meta[(d["chain"], d["token"])] = {"symbol": d.get("symbol"), "state": "this token", "mcap": None}
-    ncoins = {h["addr"]: len((h["profile"].get("coin_list") or [])) for h in hs}
+    # coins each wallet traded on EVERY chain read (home + other chains): home-only counts read 0 on rh/arc (home history
+    # not readable) and made every busy base/bsc degen look 'quiet'
+    ncoins = Counter(a for k, w in by.items() if k != (d["chain"], d["token"]) for a in w)
     for k, w in by.items():
         m = meta[k]
         if (m.get("symbol") or "").upper() in BORING or ((m.get("mcap") or 0) >= 20e6 and m.get("state") == "alive"):
@@ -615,11 +617,19 @@ async def shared_coins(d, targets):
                 # this token: launches pack buyers into minutes, so only buys <= 60 s apart count as 'together'
                 if w[a] and w[b] and abs(w[a] - w[b]) <= (60 if k == (d["chain"], d["token"]) else 600):
                     tog[a, b] += 1
+                if w[a] and w[b] and abs(w[a] - w[b]) <= 60:
+                    tight[a, b] += 1
     # sharing many trending coins is normal for busy degens (it chained 13 of 20 wallets on a BSC meme), so a pair needs
     # >= 2 small coins bought within 10 min of each other
     # quiet wallets (<= 10 real coins in the window) sharing 2 rare picks bought together count too
-    strong = [(a, b) for (a, b), n in shared.items()
-              if tog[a, b] >= 2 and (n >= 3 or (ncoins.get(a, 99) <= 10 and ncoins.get(b, 99) <= 10))]
+    # Same rule as the all-holder scan (lib/holdernet): overlap must be big RELATIVE to how much the less active wallet
+    # trades (m). Absolute counts ('>= 2 within 10 min, >= 3 shared') chained busy bots into a '9 wallets 17.7%' cluster
+    # on GREM (rh): 5 of 86 coins together is chance for wallets that buy every trending coin.
+    def is_strong(a, b):
+        m = max(1, min(ncoins.get(a, 0), ncoins.get(b, 0)))
+        return (tight[a, b] >= 3 and tight[a, b] >= 0.1 * m) or (tog[a, b] >= 3 and tog[a, b] >= 0.25 * m) \
+            or (tog[a, b] >= 2 and m <= 10)
+    strong = [(a, b) for (a, b) in shared if is_strong(a, b)]
     crowd = sum(1 for n in shared.values() if n >= 5)
     par = {}
     def f(x):
