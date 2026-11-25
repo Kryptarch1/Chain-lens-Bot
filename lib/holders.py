@@ -625,7 +625,8 @@ async def collect(chain, token, top=25, profile=20, full=False):
                            + ("the same block" if y['fund_block'] == x['fund_block'] else f"{y['fund_block'] - x['fund_block']} blocks") + f" (block {x['fund_block']})", proven=False)
     net = None
     from lib import alchemy as _al
-    if full and _al.available(chain):
+    # chains without Alchemy but with our own node (rh, arc): node logs instead (holdernet._hist_logs)
+    if full and (_al.available(chain) or RPC(chain).private):
         # every checked holder's full history: sends between holders, shared exchange deposit addresses (proof) and
         # same-rare-coin clusters (pattern) across the whole holder base
         from lib import holdernet

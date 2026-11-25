@@ -43,6 +43,52 @@ async def _hist(chain, a, outgoing):
     return out, inn
 
 
+async def _hist_logs(chain, A, big, days=14):
+    """Chains without Alchemy (rh, arc): every holder's token transfers of the last `days` days from multi-wallet
+    Transfer log scans on our own node, shaped like Alchemy rows so the same link / cluster code runs on them.
+    LENGO (rh): without this the all-holder scan never ran and pairs that bought 17 of 17 rare coins in the same block
+    went unseen."""
+    import time
+    from datetime import datetime, timezone
+    from lib import chainhist
+    from lib.rpc import RPC
+    now = time.time()
+    # spam bots (> 5,000 txs ever: 40k-nonce snipers that buy every launch) flood the log scan (one scan with them ran
+    # > 200 s on LENGO) and their overlaps with anyone are chance: leave them out and say so
+    try:
+        ns = await asyncio.wait_for(RPC(chain).batch([("eth_getTransactionCount", [a, "latest"]) for a in A]), 20)
+        bots = {a for a, n in zip(A, ns) if n and int(n, 16) > 5000}
+    except Exception:
+        bots = set()
+    A = [a for a in A if a not in bots]
+    _hist_logs.skipped = len(bots)
+
+    async def part(chunk):
+        for i in range(2):
+            try:
+                return await asyncio.wait_for(chainhist.home_logs(chain, chunk, now, days), 90)
+            except Exception:
+                if i:
+                    return {}
+                await asyncio.sleep(2)
+    parts = await asyncio.gather(*[part(A[i:i + 40]) for i in range(0, len(A), 40)])
+    H = {}
+    for rows in parts:
+        for a, rs in rows.items():
+            inn, out = [], []
+            for x in rs:
+                row = {"category": "erc20", "hash": x["hash"], "from": x["from"], "to": x["to"], "asset": None,
+                       "blockNum": hex(int(x["blockNumber"])), "uniqueId": f"{x['hash']}:{x['from']}:{x['to']}:{x['contractAddress']}",
+                       "rawContract": {"address": x["contractAddress"], "value": hex(int(x["value"] or 0))},
+                       "metadata": {"blockTimestamp": datetime.fromtimestamp(int(x["timeStamp"]), timezone.utc).isoformat().replace("+00:00", "Z")}}
+                if x["to"] == a:
+                    inn.append(row)
+                elif x["from"] == a and a in big:
+                    out.append(row)
+            H[a] = (out, inn)
+    return H
+
+
 def _amt(x):
     return alchemy._raw(x)
 
@@ -58,11 +104,17 @@ async def scan(chain, d, wallets, timing=None):
     A = [h["addr"] for h in wallets]
     S = set(A)
     big = set(sorted(A, key=lambda a: -next((h.get("pct") or 0) for h in wallets if h["addr"] == a))[:OUT_TOP])
-    res = await asyncio.gather(*[_hist(chain, a, a in big) for a in A])
-    H = {a: r for a, r in zip(A, res) if r}
     notes = []
-    if len(H) < len(A):
-        notes.append(f"history not read for {len(A) - len(H)} of {len(A)} holders (Alchemy)")
+    if alchemy.available(chain):
+        res = await asyncio.gather(*[_hist(chain, a, a in big) for a in A])
+        H = {a: r for a, r in zip(A, res) if r}
+        if len(H) < len(A):
+            notes.append(f"history not read for {len(A) - len(H)} of {len(A)} holders (Alchemy)")
+    else:
+        H = await _hist_logs(chain, A, big)
+        notes.append(f"no Alchemy on {chain}: holder histories = last 14 days of token transfers from our node "
+                     f"({len(H)} of {len(A)} wallets had any; {_hist_logs.skipped} spam bots with > 5,000 txs left out; "
+                     f"native sends between holders not seen)")
     if timing is not None:
         timing["all-holder history"] = time.time() - t0
     base = set(STABLES.get(chain, {})) | {WRAPPED.get(chain, "")}

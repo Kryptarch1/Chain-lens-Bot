@@ -200,6 +200,17 @@ funds (legal-entity or fund name, or unit price >= $20 with < 10M supply); rwa c
 now >= $1M'. Answer format: summary of findings, then a profile of EVERY holder (% owned, who it is, links, special
 traits: fresh / dormant / gem history / selective whale), then the exited list.
 
+RH / NO-ALCHEMY CHAINS + PRE-BUY + BUY CHECK (2026-11-25, LENGO on rh): (1) holdernet runs on chains without
+Alchemy but with our node (rh, arc, hyper): holder histories = 14 d of token-transfer logs (holdernet._hist_logs),
+spam bots > 5,000 txs left out; it found #1+#12 (4.99%), #22+#23 (16 of 16 coins within 60 s) and a hidden 5-wallet
+3.7% cluster that the old run missed. (2) wprofile._is_buy: any other contract's event in the tx = a buy (rh launchpad
+curves emit their own events; the swap-topic test dropped 1,278 of 1,506 real coins), >= 10 recipients = spray.
+(3) Deep-profile home fallback scans wallets up to 10,000 txs/30 d (was 300) with one retry. (4) "before this buy"
+line: wallet age (first funding) + own txs 7 / 30 d before the buy from archive nonces -> FRESH WALLET / DORMANT 30+ d
+/ quiet 7 d / app account. (5) Wealth always includes the token's own chain (rh ETH read $0 before). LENGO full run
+75 s. Holder answers: run the pair-overlap, shared-funder, alpha and fresh/dormant checks before writing; never
+write "no hidden supply" without them.
+
 TRACKED WALLETS (2026-11-25): the user's private list (KOLs, hunters, insiders; 118 at start) is data/tracked.json — data/
 is never pushed, keep it that way. `dd tracked list [text] | add <0x> <label> | rm <0x>`. `dd holders` gives every tracked
 wallet that ever held the token a full profile and prints YOUR TRACKED WALLETS (holds % / rank, sold, when + paid, linked

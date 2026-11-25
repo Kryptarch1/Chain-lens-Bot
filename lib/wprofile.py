@@ -126,8 +126,9 @@ async def _prices():
     return out
 
 
-async def _wealth(addrs, prices):
-    """-> addr -> {'chains': {chain: usd}, 'detail': [...], 'usd': total} (native + stables, live)."""
+async def _wealth(addrs, prices, home=None):
+    """-> addr -> {'chains': {chain: usd}, 'detail': [...], 'usd': total} (native + stables, live). `home` = the token's
+    chain, always read (rh was missing: #1 on LENGO held 3.65 ETH there and showed '$0')."""
     out = {a: {"chains": {}, "detail": [], "usd": 0.0} for a in addrs}
 
     async def chain(ch):
@@ -142,7 +143,7 @@ async def _wealth(addrs, prices):
         n = len(addrs)
         for i, a in enumerate(addrs):
             nat = int(r[i], 16) / 1e18 if r[i] else 0
-            usd = nat * prices.get(ch, 0)
+            usd = nat * (prices.get(ch) or (prices.get("eth", 0) if RPC(ch).cfg.get("symbol", "ETH") == "ETH" else 0))
             parts = [f"{nat:.3g} {RPC(ch).cfg.get('symbol', 'ETH')}"] if nat >= 0.001 else []
             for j, (t, (sym, dec)) in enumerate(st):
                 v = r[n + i * len(st) + j]
@@ -157,7 +158,7 @@ async def _wealth(addrs, prices):
                 out[a]["chains"][ch] = usd
                 out[a]["detail"].append(f"{ch} ${usd:,.0f} ({', '.join(parts)})")
                 out[a]["usd"] += usd
-    await asyncio.gather(*[chain(ch) for ch in WEALTH_CHAINS])
+    await asyncio.gather(*[chain(ch) for ch in WEALTH_CHAINS + ((home,) if home and home not in WEALTH_CHAINS else ())])
     return out
 
 
@@ -230,13 +231,18 @@ async def profile_all(chain, d, n=20):
         # bots with hundreds of txs a month flood the log scan (60 s+ timeouts): leave them out, they are labelled busy
         try:
             act, _ = await asyncio.wait_for(xchain._activity(chain, addrs, d["now"]), 20)
-            busy.update(a for a, v in act.items() if (v.get("d30") or 0) > 300)
+            # only true spam bots are left out: wallets with 300-5,000 txs a month scanned fine standalone (~12 s)
+            busy.update(a for a, v in act.items() if (v.get("d30") or 0) > 10_000)
         except Exception:
             pass
         try:
-            return await asyncio.wait_for(chainhist.home_logs(chain, [a for a in addrs if a not in busy], d["now"], 30), 75)
+            try:
+                return await asyncio.wait_for(chainhist.home_logs(chain, [a for a in addrs if a not in busy], d["now"], 30), 75)
+            except Exception:  # transient node error under load (failed once on LENGO, fine on the rerun): one retry
+                await asyncio.sleep(2)
+                return await asyncio.wait_for(chainhist.home_logs(chain, [a for a in addrs if a not in busy], d["now"], 30), 75)
         except Exception as e:
-            notes.append(f"{chain} 30-day transfer-log fallback failed ({type(e).__name__})")
+            notes.append(f"{chain} 30-day transfer-log fallback failed ({type(e).__name__}: {str(e)[:160]})")
             return {}
     fb_task = asyncio.create_task(home_fb()) if no_hist() else None
     hs = await asyncio.gather(*[hist(a) for a in addrs])
@@ -255,7 +261,7 @@ async def profile_all(chain, d, n=20):
         fb_task.cancel()
     prices = await prices_task
     eth_usd = prices.get(chain) or prices.get("eth") or 0
-    wealth_task = asyncio.create_task(_wealth(addrs, prices))
+    wealth_task = asyncio.create_task(_wealth(addrs, prices, chain))
 
     # ---- past coins + holdings candidates
     per, all_tokens = {}, set()
@@ -444,10 +450,57 @@ async def profile_all(chain, d, n=20):
             "protocols": [(c, names.get(c) or None, k) for c, k in prot.most_common(5)],
             "xchain": xc_res.get(a), "chain_hist": ch_hist.get(a),
         }
+    try:
+        await asyncio.wait_for(_pre_buy(chain, d, targets), 30)
+    except Exception as e:
+        notes.append(f"pre-buy nonce check failed ({type(e).__name__})")
     d["shared"] = await shared_coins(d, targets)
     notes.append(f"profiles: {len(targets)} wallets, history = newest 300 txs + 1000 token transfers each ({time.time() - t0:.1f}s; done at: "
                  + ", ".join(f"{k} {v:.0f}s" for k, v in tm.items()) + ")")
     return notes
+
+
+async def _pre_buy(chain, d, targets):
+    """Wallet age (first funding -> first buy) and own txs signed in the 7 / 30 days before the first buy, from archive
+    nonces: works on every chain, incl. rh where the explorer can't list a wallet. FRESH / DORMANT get numbers."""
+    from lib.lp import estimate_block
+    rpc = RPC(chain)
+    latest = d.get("latest") or await rpc.block_number()
+    b30, _ = await estimate_block(rpc, d["now"] - 30 * 86400, latest)
+    rate = (latest - b30) / (30 * 86400)  # blocks per second over the last 30 days
+    rows = [(h, h["first"]["block"]) for h in targets if (h.get("first") or {}).get("block") and h.get("profile")]
+    calls = [("eth_getTransactionCount", [h["addr"], hex(max(1, int(b - k)))]) for h, b in rows for k in (1, rate * 7 * 86400, rate * 30 * 86400)]
+    res = await rpc.batch(calls) if calls else []
+    for i, (h, b) in enumerate(rows):
+        try:
+            n0, n7, n30 = (int(res[3 * i + k], 16) for k in range(3))
+        except Exception:
+            continue
+        f = h["first"]
+        signer = (f.get("signer") or "").lower()
+        h["profile"]["pre_buy"] = {"nonce": n0, "d7": n0 - n7, "d30": n0 - n30,
+                                   "age_days": (f["ts"] - h["fund_ts"]) / 86400 if f.get("ts") and h.get("fund_ts") else None,
+                                   "app": bool(signer) and signer != h["addr"] and n0 <= 5}
+
+
+def _pre_buy_line(d, p):
+    pb = p.get("pre_buy")
+    if not pb:
+        return None
+    age = pb["age_days"]
+    s = "     before this buy: " + (f"wallet age {age:.1f} d (first funding)" if age is not None and age < 2 else
+                                    f"wallet age {age:.0f} d (first funding)" if age is not None else "wallet age ? (funder not found)")
+    if pb["app"]:
+        return s + f" · app / smart account (its own nonce {pb['nonce']} says nothing: an app relayer signs its trades)"
+    s += f" · {pb['nonce']} own txs ever · {pb['d7']} in the 7 d and {pb['d30']} in the 30 d before buying"
+    other30 = sum((v.get("d30") or 0) for c, v in ((p.get("xchain") or {}).get("chains") or {}).items() if c != d["chain"])
+    if age is not None and age <= 3 and pb["nonce"] <= 20:
+        s += "  ** FRESH WALLET **"
+    elif pb["d30"] == 0 and pb["nonce"] >= 10:
+        s += "  ** DORMANT 30+ d on " + d["chain"] + (" and every other chain **" if not other30 else f" ** ({other30} txs on other chains in 30 d)")
+    elif pb["d7"] == 0 and pb["nonce"] >= 10:
+        s += f"  (quiet the 7 d before buying)"
+    return s
 
 
 def _ago(now, ts):
@@ -483,6 +536,9 @@ def render(d, h):
     if p["n_deployed"]:
         act += f" · deployed {p['n_deployed']} contract(s)"
     L.append(act)
+    pbl = _pre_buy_line(d, p)
+    if pbl:
+        L.append(pbl)
     if p["paid"]:
         b = f"     this buy: {p['paid']:.4g} {d['native']}"
         if p["entry_mcap"]:
@@ -496,7 +552,7 @@ def render(d, h):
     if p.get("home_unreadable"):
         hist_from = " (last 30 d only, from transfer logs)"
         if p.get("home_busy"):
-            hist_from = " — NOT SCANNED: bot-level activity (> 300 txs in 30 d) floods the log scan"
+            hist_from = " — NOT SCANNED: spam-bot activity (> 10,000 txs in 30 d) floods the log scan"
     L.append(f"     past coins: {p['coins_total']} traded{hist_from} · {p['coins_30d']} in last 30 d · {p['coins_90d']} in 90 d"
              f" · alive {p['alive']} / dead or no pool {p['dead']} · bought within 1 h of launch: {p['early']}")
     if p["early_winners"]:
@@ -554,19 +610,32 @@ LAUNCHPADS = {"0xe2ce6ab80874fa9fa2aae65d277dd6b8e65c9de0",  # Flap portal (bsc)
 
 
 def _is_buy(rcpt, token, wallet):
-    """A real buy shows the wallet PAYING: a DEX swap / native wrapped in the tx, another token sent out by the wallet, or
-    a launchpad curve in the tx. A disperse/airdrop spam tx only moves the spam token (often to many wallets at once)."""
+    """A real buy shows the wallet PAYING: a DEX swap / native wrapped in the tx, another token sent out by the wallet, a
+    launchpad curve in the tx, or ANY other contract's event (bonding curves and app routers emit their own Buy/Trade
+    events: on rh every launchpad buy failed the swap-topic test and 1,278 of 1,506 real coins were dropped as
+    'airdrops'). A disperse/airdrop spam tx only moves the spam token, often to many wallets at once (>= 10 = spray)."""
     from lib.rpc import TRANSFER, topic_addr
+    recips, paid, other = set(), False, False
     for l in (rcpt or {}).get("logs") or []:
         t = l.get("topics") or []
         if not t:
             continue
         addr = (l.get("address") or "").lower()
         if t[0] in SWAP_TOPICS or addr in LAUNCHPADS:
-            return True
-        if t[0] == TRANSFER and addr != token and len(t) == 3 and topic_addr(t[1]).lower() == wallet:
-            return True
-    return False
+            paid = True
+        elif t[0] == TRANSFER:
+            if addr == token and len(t) == 3:
+                recips.add(topic_addr(t[2]).lower())
+            elif addr != token and len(t) == 3 and topic_addr(t[1]).lower() == wallet:
+                paid = True
+        elif t[0] != APPROVAL and addr != token:
+            other = True
+    if len(recips) >= 10:
+        return False
+    return paid or other
+
+
+APPROVAL = "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c592094221e44b0045e1a5d1f6"
 
 
 async def _real_buys(pairs):
