@@ -621,6 +621,9 @@ def render(d):
         for p in d["possible"]:
             L.append(f"   {len(p['members'])} wallets, {p['pct']:.2f}% now / {p['got_pct']:.2f}% taken in: {p['kind']}" + (f" ({p['via']})" if p["via"] else ""))
             L.append("     " + " ".join(a[:10] + "…" for a in p["members"]))
+    if d.get("shared"):
+        from lib.wprofile import render_shared
+        L += render_shared(d)
     L.append(f"TOP HOLDERS NOW ({len(now_w)})")
     for i, h in enumerate(now_w, 1):
         L += _wallet_lines(d, h, i)

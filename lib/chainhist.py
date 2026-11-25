@@ -105,7 +105,7 @@ async def collect(pairs, now, prices):
                 i_ = info.get(c) or {}
                 state = "no pool" if not i_ else ("dead" if (i_.get("liq") or 0) < 1000 else "alive")
                 early = bool(i_.get("created") and k["first"] - i_["created"] <= 3600)
-                coins.append({"symbol": i_.get("symbol") or k["symbol"] or "?", "first": k["first"], "state": state, "early": early,
+                coins.append({"token": c, "name": i_.get("name"), "symbol": i_.get("symbol") or k["symbol"] or "?", "first": k["first"], "state": state, "early": early,
                               "mcap": i_.get("mcap"), "liq": i_.get("liq"), "sold": k["out"]})
             coins.sort(key=lambda x: -(x["first"] or 0))
             win = [x for x in coins if x["early"] and x["state"] == "alive" and (x["mcap"] or 0) >= 1_000_000
@@ -117,7 +117,7 @@ async def collect(pairs, now, prices):
                 "coins": len(coins), "alive": sum(1 for x in coins if x["state"] == "alive"),
                 "early": sum(1 for x in coins if x["early"]), "early_winners": win[:6],
                 "d30": sum(1 for x in coins if x["first"] and now - x["first"] <= 30 * 86400),
-                "recent": coins[:6], "from": min(times) if times else None, "last": max(times) if times else None,
+                "recent": coins[:6], "all": coins, "from": min(times) if times else None, "last": max(times) if times else None,
                 "typical": statistics.median(swaps) if swaps else None, "n_swaps": len(swaps), "symbol": sym,
                 "usd_per_native": prices.get(ch) or None,
                 "holdings": sorted(held[a], reverse=True)[:6], "holdings_usd": sum(u for u, _ in held[a]),

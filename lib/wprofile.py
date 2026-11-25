@@ -64,7 +64,7 @@ async def _ds_tokens(chain, tokens):
             t = ((p.get("baseToken") or {}).get("address") or "").lower()
             liq = (p.get("liquidity") or {}).get("usd") or 0
             if t and (t not in best or liq > best[t]["liq"]):
-                best[t] = {"symbol": (p.get("baseToken") or {}).get("symbol"), "price": float(p.get("priceUsd") or 0), "liq": liq,
+                best[t] = {"symbol": (p.get("baseToken") or {}).get("symbol"), "name": (p.get("baseToken") or {}).get("name"), "price": float(p.get("priceUsd") or 0), "liq": liq,
                            "mcap": p.get("marketCap") or p.get("fdv"), "created": (p.get("pairCreatedAt") or 0) // 1000 or None}
     for t in todo:
         v = best.get(t, {})
@@ -204,11 +204,12 @@ async def profile_all(chain, d, n=20):
             seen.add(c)
             if c == token or c in base:
                 continue
-            k = coins.setdefault(c, {"symbol": x.get("tokenSymbol"), "first": None, "in_own": False, "out": False, "n_in": 0})
+            k = coins.setdefault(c, {"symbol": x.get("tokenSymbol"), "first": None, "in_own": False, "out": False, "n_in": 0, "txs": set()})
             ts = _ts(x.get("timeStamp"))
             if (x.get("to") or "").lower() == a:
                 k["n_in"] += 1
                 k["first"] = k["first"] or ts
+                k["txs"].add(x.get("hash"))
                 if x.get("hash") in own:
                     k["in_own"] = True
             elif (x.get("from") or "").lower() == a:
@@ -223,10 +224,16 @@ async def profile_all(chain, d, n=20):
     info = await _ds_tokens(chain, sorted(all_tokens))
     if unreadable:
         from lib.xchain import BORING
-        spray = Counter(c for a in unreadable for c, k in per[a]["coins"].items() if not k["out"])
+        # an airdrop reaches several wallets in ONE tx; real buys are separate txs (so shared buys survive this filter)
+        hit = defaultdict(Counter)
+        for a in addrs:
+            for c, k in per[a]["coins"].items():
+                for t in k["txs"]:
+                    hit[c][t] += 1
+        spray = {c for c, n in hit.items() if n and max(n.values()) >= 3}
         for a in unreadable:
             per[a]["coins"] = {c: k for c, k in per[a]["coins"].items()
-                               if (k["out"] or ((info.get(c) or {}).get("liq") and spray[c] < 4))
+                               if (k["out"] or ((info.get(c) or {}).get("liq") and c not in spray))
                                and ((info.get(c) or {}).get("symbol") or "").upper() not in BORING}
 
     # ---- current balances of every token each wallet has touched (holdings)
@@ -341,7 +348,7 @@ async def profile_all(chain, d, n=20):
             i = info.get(c) or {}
             early = bool(i.get("created") and k["first"] and k["first"] - i["created"] <= 3600)
             state = "no pool" if not i else ("dead" if (i.get("liq") or 0) < 1000 else "alive")
-            coins.append({"token": c, "symbol": i.get("symbol") or k["symbol"], "first": k["first"], "state": state,
+            coins.append({"token": c, "name": i.get("name"), "symbol": i.get("symbol") or k["symbol"], "first": k["first"], "state": state,
                           "mcap": i.get("mcap"), "liq": i.get("liq"), "early": early})
         coins.sort(key=lambda x: -(x["first"] or 0))
         now = d["now"]
@@ -363,12 +370,13 @@ async def profile_all(chain, d, n=20):
             "coins_90d": sum(1 for x in coins if x["first"] and now - x["first"] <= 90 * 86400),
             "alive": sum(1 for x in coins if x["state"] == "alive"), "dead": sum(1 for x in coins if x["state"] != "alive"),
             "early": sum(1 for x in coins if x["early"]), "early_winners": [x for x in win if x["early"]][:6], "winners": win[:6],
-            "recent_coins": coins[:8],
+            "recent_coins": coins[:8], "coin_list": coins,
             "holdings": sorted(held[a], reverse=True)[:8], "holdings_usd": sum(u for u, _, _ in held[a]),
             "wealth": wealth.get(a, {}), "eth_usd": eth_usd,
             "protocols": [(c, names.get(c) or None, k) for c, k in prot.most_common(5)],
             "xchain": xc_res.get(a), "chain_hist": ch_hist.get(a),
         }
+    d["shared"] = shared_coins(d, targets)
     notes.append(f"profiles: {len(targets)} wallets, history = newest 300 txs + 1000 token transfers each ({time.time() - t0:.1f}s; done at: "
                  + ", ".join(f"{k} {v:.0f}s" for k, v in tm.items()) + ")")
     return notes
@@ -449,4 +457,122 @@ def render(d, h):
     from lib import xchain, chainhist
     L += xchain.render(d["chain"], p.get("xchain"), now)
     L += chainhist.render(p.get("chain_hist"), now)
+    return L
+
+
+def _similar(sym, name, d):
+    """Does another coin's symbol/name look like this token's? (copycat, relaunch, the team's earlier coin)"""
+    import difflib
+    a = {(d.get("symbol") or "").lower().strip("$ "), (d.get("name") or "").lower().strip("$ ")} - {""}
+    b = {(sym or "").lower().strip("$ "), (name or "").lower().strip("$ ")} - {"", "?", "none"}
+    for x in a:
+        for y in b:
+            if x == y or (min(len(x), len(y)) >= 2 and (x in y or y in x)):
+                return True
+            if min(len(x), len(y)) >= 4 and difflib.SequenceMatcher(None, x, y).ratio() >= 0.75:
+                return True
+    return False
+
+
+def shared_coins(d, targets):
+    """Other coins that SEVERAL top holders traded (home chain + their other chains). Many top holders in the same
+    other coin = a team bundle reusing its wallets, or one degen group / copy-trade circle. Bought within minutes of
+    each other = coordinated. A similar name = possibly the team's earlier coin or a copy."""
+    hs = [h for h in targets if "holder" in h["roles"] and h.get("profile")][:20]
+    rank = {h["addr"]: i for i, h in enumerate(hs)}
+    by, meta = defaultdict(dict), {}
+    for h in hs:
+        a, p = h["addr"], h["profile"]
+        for x in p.get("coin_list") or []:
+            k = (d["chain"], x["token"])
+            by[k][a] = x["first"]; meta[k] = x
+        for ch, v in (p.get("chain_hist") or {}).items():
+            for x in (v or {}).get("all") or []:
+                k = (ch, x["token"])
+                by[k].setdefault(a, x["first"]); meta.setdefault(k, x)
+    from lib.xchain import BORING
+    out = []
+    for k, w in by.items():
+        m = meta[k]
+        if (m.get("symbol") or "").upper() in BORING:
+            continue
+        sim = _similar(m.get("symbol"), m.get("name"), d)
+        if len(w) < (2 if sim else 3):
+            continue
+        ts = sorted(t for t in w.values() if t)
+        tight = min(ts[i + 2] - ts[i] for i in range(len(ts) - 2)) if len(ts) >= 3 else (ts[1] - ts[0] if len(ts) == 2 else None)
+        out.append({"chain": k[0], "token": k[1], "symbol": m.get("symbol") or "?", "state": m.get("state"), "mcap": m.get("mcap"),
+                    "n10": sum(1 for a in w if rank[a] < 10), "n20": len(w), "who": sorted(w, key=lambda a: rank[a]),
+                    "ranks": sorted(rank[a] + 1 for a in w), "tight": tight, "similar": sim,
+                    "first": ts[0] if ts else None})
+    for x in out:
+        x["popular"] = (x["mcap"] or 0) >= 20e6 and x["state"] == "alive"
+        x["together"] = x["tight"] is not None and x["tight"] <= 600
+    out.sort(key=lambda x: (-x["similar"], x["popular"], -x["together"], -x["n10"], -x["n20"], x["tight"] if x["tight"] is not None else 9e9))
+    # wallet pairs that keep buying the same SMALL coins (big popular coins say nothing), often within minutes
+    shared, tog = Counter(), Counter()
+    for k, w in by.items():
+        m = meta[k]
+        if (m.get("symbol") or "").upper() in BORING or ((m.get("mcap") or 0) >= 20e6 and m.get("state") == "alive"):
+            continue
+        ws = sorted(w)
+        for i in range(len(ws)):
+            for j in range(i + 1, len(ws)):
+                a, b = ws[i], ws[j]
+                shared[a, b] += 1
+                if w[a] and w[b] and abs(w[a] - w[b]) <= 600:
+                    tog[a, b] += 1
+    # sharing many trending coins is normal for busy degens (it chained 13 of 20 wallets on a BSC meme), so a pair needs
+    # >= 2 small coins bought within 10 min of each other
+    strong = [(a, b) for (a, b), n in shared.items() if tog[a, b] >= 2 and n >= 3]
+    crowd = sum(1 for n in shared.values() if n >= 5)
+    par = {}
+    def f(x):
+        par.setdefault(x, x)
+        while par[x] != x:
+            par[x] = par[par[x]]; x = par[x]
+        return x
+    for a, b in strong:
+        par[f(a)] = f(b)
+    groups = defaultdict(list)
+    for a in {x for pr in strong for x in pr}:
+        groups[f(a)].append(a)
+    pct = {h["addr"]: h.get("pct") or 0 for h in hs}
+    clusters = []
+    for g in groups.values():
+        g.sort(key=lambda a: rank[a])
+        prs = [(a, b) for a, b in strong if a in g and b in g]
+        clusters.append({"who": g, "ranks": [rank[a] + 1 for a in g], "pct": sum(pct[a] for a in g),
+                         "pairs": [(rank[a] + 1, rank[b] + 1, shared[a, b], tog[a, b]) for a, b in sorted(prs, key=lambda p: (-tog[p], -shared[p]))]})
+    clusters.sort(key=lambda c: -c["pct"])
+    return {"n_top": len(hs), "n10": min(10, len(hs)), "coins": out[:15], "clusters": clusters,
+            "crowd": crowd, "n_pairs": len(hs) * (len(hs) - 1) // 2}
+
+
+def render_shared(d):
+    sh = d.get("shared") or {}
+    if not sh.get("coins"):
+        return ["SHARED COINS  no other coin traded by 3+ of the top holders (" + str(sh.get("n_top", 0)) + " profiled)"] if sh else []
+    L = [f"SHARED COINS  other coins several top holders traded (team bundle reusing wallets, or one degen / copy-trade group)"]
+    now = d["now"]
+    for x in sh["coins"]:
+        win = x["tight"]
+        wtxt = "" if win is None or win > 3600 else (f" · 3 of them bought within {win / 60:.0f} min" if x["n20"] >= 3 else f" · bought {win / 60:.0f} min apart")
+        if x["together"]:
+            wtxt += "  ** TOGETHER **"
+        if x["popular"]:
+            wtxt += " (big popular coin: weak signal)"
+        st = (f"${x['mcap'] / 1e6:,.1f}M" if (x["mcap"] or 0) >= 1e6 else f"${(x['mcap'] or 0) / 1e3:,.0f}k") if x["state"] == "alive" and x["mcap"] else (x["state"] or "?")
+        L.append(f"   {x['symbol']} ({x['chain']}, {st}, {x['token']}): {x['n10']} of top {sh['n10']} · {x['n20']} of top {sh['n_top']}"
+                 + f" (holders #{', #'.join(map(str, x['ranks']))})" + wtxt
+                 + (f" · first bought {_ago(now, x['first'])} ago" if x["first"] else "")
+                 + ("  ** SIMILAR NAME to this token **" if x["similar"] else ""))
+    if sh.get("n_pairs"):
+        L.append(f"   overlap: {sh['crowd']} of {sh['n_pairs']} holder pairs share 5+ small coins"
+                 + (" (high: this holder base is one trending-coin crowd)" if sh["crowd"] >= sh["n_pairs"] * 0.15 else ""))
+    for c in sh.get("clusters") or []:
+        L.append(f"   CLUSTER holders #{', #'.join(map(str, c['ranks']))} (hold {c['pct']:.2f}% now): bought the same small coins within minutes, repeatedly — "
+                 + "; ".join(f"#{a}+#{b}: {n} shared, {t} within 10 min" for a, b, n, t in c["pairs"][:6])
+                 + "  -> one person, a copy-trader following another, or a group calling the same coins (not proof)")
+        L.append("     " + " ".join(c["who"]))
     return L

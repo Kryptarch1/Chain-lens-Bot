@@ -141,8 +141,14 @@ use the last 30 d of the wallets' token transfers from our node (chainhist.home_
 'activity on <chain>: N txs signed (nonce) … age/dormancy not judged'; wallets with > 300 txs in 30 d are skipped as
 bot-level. Wallets that sign ~1 tx and trade through a relayer are app accounts (BSC trading apps); a 1e-18 BNB 'funding' from
 a service (0x2ac6…25dc) is an app marker, not real funding or wallet age.
+SHARED COINS (wprofile.shared_coins, printed before TOP HOLDERS): other coins (home + other chains) that 3+ of the top 20
+traded, ranked: similar name to this token first, big popular coins (>= $20M) last as weak signals, '** TOGETHER **' = 3 bought
+within 10 min. CLUSTER = holder pairs that bought >= 2 of the same SMALL coins within 10 min of each other (union of such
+pairs; strongest pairs listed first) -> one person / copy-trader / calling group, not proof. Airdrops are dropped by 'one tx
+reached 3+ wallets'. Busy BSC degens share many trending coins: plain overlap alone is crowd behaviour.
 ANSWER FORMAT (user rules): wallets only, no safety lines; EVERY wallet is a clickable explorer link; overview of the
-current situation first, then a section per top wallet; deep, not a summary table.
+verdict on the holder base first, then ONLY high-impact findings (clusters, smart money vs bots, sellers, wallets to
+watch) one line each; NO buy mechanics (relayer, position, routers, tx counts, dust funding) unless it changes the conclusion.
 
 ## Four questions (when the user asks "is it safe")
 1. Can the token hurt me? (mint, blacklist, pause, fees, proxy, hidden callers)
