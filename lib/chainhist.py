@@ -28,7 +28,8 @@ async def _one(chain, addr, sem):
             tt = await asyncio.wait_for(ex.tokentx(addr, limit=1000), 45) or []
         except Exception as e:
             return {"error": type(e).__name__}
-        if not tt and ex.es_id in explorer.FREE_UNSUPPORTED:
+        from lib import alchemy
+        if not tt and ex.es_id in explorer.FREE_UNSUPPORTED and not alchemy.available(chain):
             return {"error": "not readable on the free Etherscan key"}
         try:
             tl = await asyncio.wait_for(ex.txlist(addr, limit=300), 45) or []

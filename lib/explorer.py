@@ -4,7 +4,7 @@ All functions return [] / {} on failure instead of raising, and say which source
 """
 import asyncio, json, os, time
 import aiohttp
-from lib import cache, hypersync
+from lib import cache, hypersync, alchemy
 from lib.rpc import CHAINS, ROOT
 
 KEYFILE = os.path.join(ROOT, "keys", "etherscan")
@@ -101,6 +101,10 @@ class Explorer:
             q = "&".join(f"{k}={v}" for k, v in nxt.items())
         return out
 
+    def alch(self):
+        """The free Etherscan key can't list wallets on this chain (learned on the first call) and Alchemy can."""
+        return self.es_id in FREE_UNSUPPORTED and alchemy.available(self.chain)
+
     # ---------- unified ----------
     async def source_full(self, addr):
         """Verified source + compiler settings, for compiling (Slither).
@@ -190,6 +194,11 @@ class Explorer:
             await self.rs_api("account", "txlist", address=addr, sort="desc", page=1, offset=limit)
         if r and isinstance(r, list):
             return [{**t, "via": "etherscan"} for t in r]
+        if self.alch():
+            try:
+                return await alchemy.txlist(self.chain, addr, limit)
+            except Exception:
+                pass
         cid = CHAINS.get(self.chain, {}).get("id")
         if hypersync.available(cid):
             try:
@@ -212,6 +221,12 @@ class Explorer:
         r = await self.es("account", "tokentx", **kw) or await self.rs_api("account", "tokentx", **kw)
         if r and isinstance(r, list):
             return r
+        if self.alch():
+            try:
+                rows = await alchemy.tokentx(self.chain, addr, limit)
+                return [x for x in rows if not contract or x["contractAddress"] == contract.lower()]
+            except Exception:
+                pass
         if self.bs:
             items = await self.bs_pages(f"/api/v2/addresses/{addr}/token-transfers", max_pages=max(1, limit // 50))
             return [{"hash": i.get("transaction_hash") or i.get("tx_hash"), "from": (i.get("from") or {}).get("hash"),
@@ -273,6 +288,12 @@ class Explorer:
             await self.rs_api("account", "txlist", address=addr, sort="asc", page=1, offset=20)
         rows = r if (r and isinstance(r, list)) else []
         cid = CHAINS.get(self.chain, {}).get("id")
+        if not rows and self.alch():
+            ff = await alchemy.first_funding(self.chain, addr)
+            if ff.get("from"):
+                return ff
+            if ff.get("none"):
+                return {}
         if not rows and hypersync.available(cid):
             try:
                 ff = await hypersync.first_funding(cid, addr)

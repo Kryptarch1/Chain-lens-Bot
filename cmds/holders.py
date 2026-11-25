@@ -27,7 +27,7 @@ async def main(chain, token, top, as_json):
 
     async def full():
         try:
-            return await asyncio.wait_for(holders.collect(chain, token, top=top, profile=0, full=True), 360)
+            return await asyncio.wait_for(holders.collect(chain, token, top=top, profile=0, full=True), 420)
         except Exception as e:
             return {"error": f"all-holder pass failed ({type(e).__name__}: {str(e)[:80]})"}
     full_task = asyncio.ensure_future(full())

@@ -133,10 +133,13 @@ async def profile_all(chain, d, n=20):
     targets += [h for h in d["wallets"] if h["dev"] and h not in targets]
     addrs = [h["addr"] for h in targets]
     notes = []
-    sem = asyncio.Semaphore(4)
+    from lib import alchemy
+    sem = asyncio.Semaphore(12 if (ex.es_id in explorer.FREE_UNSUPPORTED or chain in alchemy.NETS) and alchemy.available(chain) else 4)
+
+    no_hist = lambda: ex.es_id in explorer.FREE_UNSUPPORTED and not alchemy.available(chain)
 
     async def hist(a):
-        if ex.es_id in explorer.FREE_UNSUPPORTED:
+        if no_hist():
             return [], []  # the explorer's fallback (HyperSync txlist, 15 req/min) costs ~25 s a wallet when rate limited
         async with sem:
             try:
@@ -191,13 +194,13 @@ async def profile_all(chain, d, n=20):
         except Exception as e:
             notes.append(f"{chain} 30-day transfer-log fallback failed ({type(e).__name__})")
             return {}
-    fb_task = asyncio.create_task(home_fb()) if ex.es_id in explorer.FREE_UNSUPPORTED else None
+    fb_task = asyncio.create_task(home_fb()) if no_hist() else None
     hs = await asyncio.gather(*[hist(a) for a in addrs])
     tm = {"history": time.time() - t0}
     # the free Etherscan key can't list wallets on this chain (BSC/Base/Robinhood): never read "no history" as
     # "brand-new"; use the node's last-30-day token transfers instead and say so
     unreadable = set()
-    if ex.es_id in explorer.FREE_UNSUPPORTED:
+    if no_hist():
         unreadable = {a for a, (tl, tt) in zip(addrs, hs) if not tt}
         if unreadable:
             fb = await (fb_task or asyncio.create_task(home_fb()))

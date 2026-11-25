@@ -136,8 +136,13 @@ size, last active, holdings there. The free Etherscan key does NOT serve base, b
 but busy on bsc is shown as not dormant).
 MARKETS (lib/holders.find_markets): any contract that sent the token to >= 20 wallets AND received it from >= 20 is a market
 (launchpad bonding curve like Flap's portal 0xe2ce…9de0, or a router) and counts as a pool, so curve buys are BUYS, not
-'received from'. HOME CHAIN NOT READABLE (bsc/base/rh on the free key): profiles never read 'no history' as brand-new; they
-use the last 30 d of the wallets' token transfers from our node (chainhist.home_logs, ~10 s, no HyperSync) and print
+'received from'. HOME CHAIN NOT READABLE (bsc/base/rh on the free key): since 2026-11-25 ALCHEMY (lib/alchemy.py, free key in
+keys/alchemy, eth/base/bsc enabled) fills it: explorer.txlist/tokentx/funded_by fall back to alchemy_getAssetTransfers when the
+free Etherscan key is unsupported (explorer.alch()), in Etherscan's row shapes, so profiles, other-chain history, payout and
+relayer checks read FULL history on bsc/base. Free plan = ~8 history calls/s sustained (measured; 10/s gets 429s): one shared
+pacer (DD_ALCHEMY_RPS, default 8) with priority — profile/explorer reads go first, the background all-holder scan
+(low=True) waits. Without Alchemy (rh, arc, or key missing) the old fallback applies: profiles never read 'no history' as
+brand-new; they use the last 30 d of the wallets' token transfers from our node (chainhist.home_logs, ~10 s, no HyperSync) and print
 'activity on <chain>: N txs signed (nonce) … age/dormancy not judged'; wallets with > 300 txs in 30 d are skipped as
 bot-level. Wallets that sign ~1 tx and trade through a relayer are app accounts (BSC trading apps); a 1e-18 BNB 'funding' from
 a service (0x2ac6…25dc) is an app marker, not real funding or wallet age.
@@ -162,9 +167,17 @@ rest is dust, counted) gets funder + 2nd hop + buy signer + token-transfer links
 flagged 'includes top holder #N' or 'hidden in the small holders', and SUPPLY 100% = where every token sits now (pools,
 contracts, dev-linked, proven/likely groups, same-coin clusters (top 20), gas-sponsored app accounts (unlinkable by funding),
 funded < 1 h before first token, independent, dust). New PROVEN link: one BUY tx delivered tokens to 2-30 holders (bundle
-buy; fee/referral cuts < 10% of the biggest share are ignored). Cold run on ~600 holders: ~1.5-2.5 min; cached reruns faster.
-Same-coin (copy-trade) clusters still cover only the top 20: app accounts (~25% of supply on four.meme/Flap coins) stay
-unlinked unless they're in the top 20.
+buy; fee/referral cuts < 10% of the biggest share are ignored).
+ALL-HOLDER HISTORY (lib/holdernet.py, eth/base/bsc via Alchemy): one incoming-transfers call per checked holder (+ outgoing for
+the top 60) adds (1) PROVEN 'X sent N BNB / a token straight to holder Y' — native >= 0.01 counts; a token send counts only if
+the sender SIGNED the tx and it reached <= 4 addresses (address-poisoning fakes and disperse sprays fail); (2) PROVEN shared
+exchange deposit address (an EOA two holders paid that forwards >= 90% to one exchange hot wallet); (3) SAME-COIN CLUSTERS
+across all holders (pattern): rare coins only (2-10 of the checked holders), sprays/no-payment buys dropped, and the pair rule is
+RELATIVE to activity (m = coins the less active wallet traded): >= 3 within 60 s and >= 10% of m, or >= 3 within 10 min and
+>= 25% of m, or >= 2 within 10 min if m <= 10. Absolute counts chained 28 busy BSC bots into one '37%' cluster — never go back to
+them. Pairs with dozens of coins bought within 60 s (e.g. 116 of 132) are one operator. Timing: cold ~350 holders ~1.5-3 min,
+~600 holders ~5 min for the ALL HOLDERS section (quick pass ~10 s and deep profiles ~35-50 s still print first); histories cached
+30 min, funders forever.
 REAL-BUY CHECK (wprofile._is_buy / _real_buys, 2026-11-25): disperse bots spray fake coins to hundreds of wallets per tx
 (mihao/FLOAT on BSC: 317 recipients in one tx), which looked like 'shared coins bought together'. A wallet+coin counts only
 if its first tx of that coin shows the wallet PAYING: a V2/V3/PancakeV3/V4 Swap or WBNB/WETH Deposit in the receipt, another
