@@ -383,17 +383,25 @@ class RPC:
                 f["address"] = address
             if topics:
                 f["topics"] = topics
-            try:
-                async with sem:  # hold a slot only for the request itself, never across the split below
-                    return await self.call("eth_getLogs", [f])
-            except RPCError as err:
-                if self._is_range_err(str(err)) or "limit" in str(err).lower():
-                    if e - s < 10:
-                        return []
-                    mid = (s + e) // 2
-                    a, b = await asyncio.gather(one(s, mid), one(mid + 1, e))
-                    return a + b
-                raise
+            for attempt in range(3):
+                try:
+                    async with sem:  # hold a slot only for the request itself, never across the split below
+                        return await self.call("eth_getLogs", [f])
+                except RPCError as err:
+                    if self._is_range_err(str(err)) or "limit" in str(err).lower():
+                        if e - s < 10:
+                            return []
+                        mid = (s + e) // 2
+                        a, b = await asyncio.gather(one(s, mid), one(mid + 1, e))
+                        return a + b
+                    if attempt == 2:
+                        raise
+                except Exception:
+                    # a busy node drops a request now and then: one lost chunk out of ~270 used to sink a whole
+                    # multi-wallet history scan (SpaceXCoin all-holder pass came back empty under load)
+                    if attempt == 2:
+                        raise
+                await asyncio.sleep(0.5 * (attempt + 1))
 
         for res in await asyncio.gather(*[one(s, e) for s, e in chunks]):
             out.extend(res)

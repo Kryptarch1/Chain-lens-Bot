@@ -59,7 +59,7 @@ owner-only functions and says "ask for dd sim to confirm".
 | What does this ONE function really do (read the code) | `dd code <chain> <address> <function>` (name, signature or selector; `--from 0x..` `--args a,b` to choose caller/args; works on proxies and hooks) |
 | Where did a wallet's money come from | `dd trace <chain> <wallet>` |
 | The user's tracked wallets (KOL/hunter list) | `dd tracked list [text]`, `dd tracked add <0x> <label>`, `dd tracked rm <0x>` |
-| Who holds it / wallet analysis / bundles / "analyse the holders" | `dd holders <chain> <token>` (quick pass, then deep profiles + ALL HOLDERS (every wallet >= 0.01%); `--fast` quick only, `--top N`, `--json`) — then write the deep analysis yourself (see HOLDERS below) |
+| Who holds it / wallet analysis / bundles / "analyse the holders" | `dd holders <chain> <token>` (quick pass, deep profiles, ALL HOLDERS, then the REPORT in the user's format, within 60 s for coins < 1 day old / 120 s otherwise; `--fast` quick only, `--top N`, `--json`, `--budget S`) — run it ONCE, send the report file (data/reports/…md) and add a short verdict; no hand-made checks (see TIME BUDGET + REPORT below) |
 | Anything else (old toolkit) | `dd <chain> token|audit|cast|rpc|fork|wallet` |
 
 `dd check` covers: functions (bytecode → names → risky/unknown), who can call each privileged function
@@ -210,6 +210,32 @@ line: wallet age (first funding) + own txs 7 / 30 d before the buy from archive 
 / quiet 7 d / app account. (5) Wealth always includes the token's own chain (rh ETH read $0 before). LENGO full run
 75 s. Holder answers: run the pair-overlap, shared-funder, alpha and fresh/dormant checks before writing; never
 write "no hidden supply" without them.
+
+TIME BUDGET + REPORT (2026-11-26, user: "thorough deep searches in 1 min for new coins, 2 min max"): `dd holders` starts
+everything at second 0 and prints each section when ready: QUICK PASS (~8-15 s), DEEP PROFILES (top 20 + dev), ALL HOLDERS,
+then the REPORT (lib/report.py: summary of findings with "Meaning:", every top holder's profile, exited buyers grouped by
+operator, not checked) written to data/reports/ (never pushed). Budget = 60 s if the TOKEN's creation block is < 1 day old,
+else 120 s (DD_HOLDERS_BUDGET / --budget). Deadlines are pushed INTO every slow stage (profiles, funders, scan), so a tight
+budget gives partial sections + a 'not finished' note, never an empty one; the quick pass is never cut, and the all-holder
+pass's heavy part waits until the quick pass is printed. Measured: SpaceXCoin (bsc, 700 wallets) 47-52 s, LENGO (rh) 55 s,
+CLNS (base) 57 s; the old flow ran 7.5 min and the all-holder pass timed out with nothing.
+ALL-HOLDER HISTORY = ONE NODE LOG SCAN (lib/holdernet.load / _hist_logs): every checked wallet in ONE Transfer topic filter
+(cost grows with the block range, not the wallet count: 756 wallets x 7 d = 20 s; 100-wallet chunks took 73 s, Alchemy
+one-by-one 6 min), incoming transfers only, window 3 d (coin < 1 d) / 7 d (< 3 d) / 14 d. Native BNB/ETH sends come from
+Alchemy for the key wallets only (top holders, exited big buyers, dev, tracked; deadline-capped). HyperSync's free plan is
+useless for this (15 req/min: 28% of 7 days in 4.6 min). Real-buy receipts capped at 1,500 (key wallets first); single
+eth_getLogs chunks retry before failing (one lost chunk used to sink the whole scan); a history read failure is printed.
+NEW CHECKS: (1) LEADER -> FOLLOWER pairs (wprofile.leader_pairs, top 20 with long history AND key wallets in the all-holder
+scan): >= 4 small coins where one buys first and the other follows 3 s-10 min later, >= 85% one direction, median <= 3 min,
+buys in a coin's first 2 min left out (snipe races) — SpaceXCoin #1 -> #12 6/6 coins ~41 s behind (copy-trade / side
+wallet); (2) same-block share per cluster pair ('one operator's script'); (3) the DEV's OTHER coins (who.past_coins) and who
+was in within 60 s of their launch; an early buyer is called an insider only with a second tie (paid by / linked to the dev:
+SpaceXCoin dev paid 0x6d3e 1.149 BNB, which sniped both coins); (4) dev outgoing native sends to any checked wallet.
+FIXES: a failed nonce/code read is 'unknown', never '0 txs' (it turned an exchange into a private funder = false PROVEN
+'same first funder'); app accounts are DORMANT only with no coin buys in the 30 d before (their own nonce stays flat while
+they trade daily: SpaceXCoin #1/#7/#8 were mislabelled); FRESH = wallet <= 3 d old at the buy; native price from the wrapped
+token's deepest pair on either side (WBNB is usually the quote: 56 BNB showed as $467); identical concurrent Alchemy requests
+are single-flighted; DexScreener coin info cached 30 min (no pool: 2 h); payout-service and relayer checks capped at 5 s total.
 
 TRACKED WALLETS (2026-11-25): the user's private list (KOLs, hunters, insiders; 118 at start) is data/tracked.json — data/
 is never pushed, keep it that way. `dd tracked list [text] | add <0x> <label> | rm <0x>`. `dd holders` gives every tracked

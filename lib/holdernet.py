@@ -23,6 +23,7 @@ TOG = 600
 MIN_NATIVE = 0.01  # smaller native sends are the spam / address-poisoning range
 MAX_RCPT = 4
 OUT_TOP = 60  # holders whose outgoing transfers are read (exchange deposit addresses)
+RECEIPT_CAP = 1500  # real-buy receipt checks per scan
 
 
 async def _hist(chain, a, outgoing):
@@ -43,35 +44,33 @@ async def _hist(chain, a, outgoing):
     return out, inn
 
 
-async def _hist_logs(chain, A, big, days=14):
-    """Chains without Alchemy (rh, arc): every holder's token transfers of the last `days` days from multi-wallet
-    Transfer log scans on our own node, shaped like Alchemy rows so the same link / cluster code runs on them.
-    LENGO (rh): without this the all-holder scan never ran and pairs that bought 17 of 17 rare coins in the same block
-    went unseen."""
+async def _hist_logs(chain, A, big, days=7):
+    """Every checked holder's token transfers of the last `days` days from ONE multi-wallet Transfer log scan on our own
+    node (all wallets in one topic filter), shaped like Alchemy rows so the same link / cluster code runs on them.
+    The cost grows with the block range, not with the number of wallets: SpaceXCoin (bsc) 756 wallets x 7 d = 20 s in one
+    filter; chunks of 100 wallets took 73 s and Alchemy one-wallet-at-a-time ran 6 min and timed out. Busy snipers stay
+    in (their same-block pairs are the finding)."""
     import time
     from datetime import datetime, timezone
     from lib import chainhist
-    from lib.rpc import RPC
     now = time.time()
-    # spam bots (> 5,000 txs ever: 40k-nonce snipers that buy every launch) flood the log scan (one scan with them ran
-    # > 200 s on LENGO) and their overlaps with anyone are chance: leave them out and say so
-    try:
-        ns = await asyncio.wait_for(RPC(chain).batch([("eth_getTransactionCount", [a, "latest"]) for a in A]), 20)
-        bots = {a for a, n in zip(A, ns) if n and int(n, 16) > 5000}
-    except Exception:
-        bots = set()
-    A = [a for a in A if a not in bots]
-    _hist_logs.skipped = len(bots)
+    _hist_logs.skipped = 0
+
+    _hist_logs.errors = []
 
     async def part(chunk):
         for i in range(2):
             try:
-                return await asyncio.wait_for(chainhist.home_logs(chain, chunk, now, days), 90)
-            except Exception:
+                # incoming only: coins (first buys) and holder-to-holder sends are both seen from the receiving side;
+                # native sends come from Alchemy. Halves the node calls (the scan shares Chainstack's rate with the
+                # profiles' log scans on every chain and ran > 44 s under load).
+                return await asyncio.wait_for(chainhist.home_logs(chain, chunk, now, days, outgoing=False), 75)
+            except Exception as e:
                 if i:
+                    _hist_logs.errors.append(f"{type(e).__name__}: {str(e)[:80]}")
                     return {}
-                await asyncio.sleep(2)
-    parts = await asyncio.gather(*[part(A[i:i + 40]) for i in range(0, len(A), 40)])
+                await asyncio.sleep(1)
+    parts = await asyncio.gather(*[part(A[i:i + 800]) for i in range(0, len(A), 800)])
     H = {}
     for rows in parts:
         for a, rs in rows.items():
@@ -89,32 +88,87 @@ async def _hist_logs(chain, A, big, days=14):
     return H
 
 
+async def _native(chain, A0, big, deadline):
+    """Native-coin sends (BNB/ETH) for the wallets that matter most (top holders, big exited buyers, dev, tracked):
+    Alchemy, incoming for all of them + outgoing for the biggest. Token logs can't show native sends. Whatever is not
+    read by the deadline is skipped (counted in the notes)."""
+    import time
+    from lib import cache
+    if not alchemy.available(chain):
+        return {}, len(A0)
+
+    async def one(a):
+        key = f"alch:nat:{chain}:{a}:{int(a in big)}"
+        c = cache.get(key)
+        if c is not None:
+            return c
+        inn = await alchemy.transfers(chain, a, "to", ["external"], max_count=300, low=True)
+        out = await alchemy.transfers(chain, a, "from", ["external"], max_count=300, low=True) if a in big else []
+        cache.set(key, [out, inn], ttl=1800)
+        return out, inn
+    tasks = {a: asyncio.ensure_future(one(a)) for a in A0}
+    left = max(1.0, deadline - time.time()) if deadline else 60
+    await asyncio.wait(list(tasks.values()), timeout=left)
+    res, miss = {}, 0
+    for a, t in tasks.items():
+        if t.done() and not t.exception():
+            res[a] = t.result()
+        else:
+            miss += 1
+            t.cancel()
+    return res, miss
+
+
 def _amt(x):
     return alchemy._raw(x)
 
 
-async def scan(chain, d, wallets, timing=None):
-    """wallets: holder dicts (addr, first, pct). -> {'links': [(a, b, why)], 'clusters': [...], 'notes': [...]}"""
+async def load(chain, A, pct0, devs, core=None, days=7, deadline=None):
+    """Holder histories, started as soon as the wallet list is known (runs alongside the funder lookups).
+    -> (H {addr: (outgoing rows, incoming rows)}, big, notes)"""
+    import time
+    S = set(A)
+    devs = [x.lower() for x in devs or []]
+    big = set(sorted(A, key=lambda a: -(pct0.get(a) or 0))[:OUT_TOP]) | (set(devs) & S)
+    A0 = [a for a in (core or A[:80]) if a in S]
+    big |= set(A0[:OUT_TOP])
+    sym = RPC(chain).cfg.get("symbol") or "ETH"
+    notes = []
+    if RPC(chain).private:
+        (H, (nat, miss)) = await asyncio.gather(_hist_logs(chain, A, big, days),
+                                                _native(chain, A0, big, (deadline - 8) if deadline else time.time() + 40))
+        for a, (o, i) in nat.items():
+            H[a] = (H[a][0] + o, H[a][1] + i) if a in H else (o, i)
+        if getattr(_hist_logs, "errors", None):
+            notes.append(f"holder token-transfer history NOT read ({'; '.join(_hist_logs.errors)[:160]}): same-coin clusters / leaders missing")
+        notes.append(f"holder histories = last {days} days of token transfers from our node ({len(H)} of {len(A)} wallets had any)"
+                     + (f"; native {sym} sends read for {len(nat)} key wallets" + (f" ({miss} not read in time)" if miss else "")
+                        if alchemy.available(chain) else f"; native {sym} sends between holders not seen (no Alchemy on {chain})"))
+    else:
+        res = await asyncio.gather(*[_hist(chain, a, a in big) for a in A])
+        H = {a: r for a, r in zip(A, res) if r}
+        if len(H) < len(A):
+            notes.append(f"history not read for {len(A) - len(H)} of {len(A)} holders (Alchemy)")
+    return H, big, notes
+
+
+async def scan(chain, d, wallets, timing=None, days=7, deadline=None, core=None, loaded=None):
+    """wallets: holder dicts (addr, first, pct). core: the wallets that matter most (top holders, exited big buyers,
+    dev, tracked) whose native sends are read too. loaded: a load() result started earlier.
+    -> {'links': [(a, b, why)], 'clusters': [...], 'notes': [...], 'dev_coins': [...]}"""
     from lib.wprofile import STABLES, WRAPPED, _real_buys
     from lib.xchain import BORING
     import time
     t0 = time.time()
     token = d["token"]
     sym = d.get("native") or "ETH"
+    devs = [x.lower() for x in d.get("devs") or []]
     A = [h["addr"] for h in wallets]
     S = set(A)
-    big = set(sorted(A, key=lambda a: -next((h.get("pct") or 0) for h in wallets if h["addr"] == a))[:OUT_TOP])
-    notes = []
-    if alchemy.available(chain):
-        res = await asyncio.gather(*[_hist(chain, a, a in big) for a in A])
-        H = {a: r for a, r in zip(A, res) if r}
-        if len(H) < len(A):
-            notes.append(f"history not read for {len(A) - len(H)} of {len(A)} holders (Alchemy)")
-    else:
-        H = await _hist_logs(chain, A, big)
-        notes.append(f"no Alchemy on {chain}: holder histories = last 14 days of token transfers from our node "
-                     f"({len(H)} of {len(A)} wallets had any; {_hist_logs.skipped} spam bots with > 5,000 txs left out; "
-                     f"native sends between holders not seen)")
+    if loaded is None:
+        loaded = await load(chain, A, {h["addr"]: h.get("pct") for h in wallets}, devs, core, days, deadline)
+    H, big, notes = loaded
+    notes = list(notes)
     if timing is not None:
         timing["all-holder history"] = time.time() - t0
     base = set(STABLES.get(chain, {})) | {WRAPPED.get(chain, "")}
@@ -138,6 +192,12 @@ async def scan(chain, d, wallets, timing=None):
                     cand[(a, b)].insert(0, ("native", f"{v:.4g} {sym}", x.get("hash")))
             elif x.get("category") == "erc20":
                 cand[(a, b)].append(("token", x.get("asset") or "tokens", x.get("hash")))
+    for a, (out, _) in H.items():
+        for x in out:
+            b = (x.get("to") or "").lower()
+            if b in S and b != a and x.get("category") == "external" and _amt(x) / 1e18 >= MIN_NATIVE \
+                    and not any(k == "native" for k, _, _ in cand[(a, b)]):
+                cand[(a, b)].insert(0, ("native", f"{_amt(x) / 1e18:.4g} {sym}", x.get("hash")))
     links = []
     check = sorted({t for v in cand.values() for k, _, t in v[:3] if k == "token" and not any(kk == "native" for kk, _, _ in v)})
     good = set()
@@ -156,7 +216,7 @@ async def scan(chain, d, wallets, timing=None):
     for (a, b), v in cand.items():
         for kind, what, t in v[:3]:
             if kind == "native" or (t, a) in good:
-                links.append((a, b, f"{a} sent {what} straight to holder {b} (tx {t})"))
+                links.append((a, b, f"{'the DEV ' if a in devs else ''}{a} sent {what} straight to {'the DEV ' if b in devs else 'wallet '}{b} (tx {t})"))
                 break
 
     # --- 2. shared exchange deposit addresses
@@ -211,12 +271,12 @@ async def scan(chain, d, wallets, timing=None):
             if not c or c == token or c in base or (x.get("asset") or "").upper() in BORING:
                 continue
             coins.add(c)
-            first[(c, a)] = (alchemy._ts(x) or 0, x.get("hash"))
+            first[(c, a)] = (alchemy._ts(x) or 0, x.get("hash"), int(x.get("blockNum") or "0x0", 16))
             by_tx[(c, x.get("hash"))].add(a)
         ncoins[a] = len(coins)
     spray = {k for k, ws in by_tx.items() if len(ws) >= 3}
     holders_of = defaultdict(list)
-    for (c, a), (ts, h) in first.items():
+    for (c, a), (ts, h, _b) in first.items():
         if (c, h) not in spray:
             holders_of[c].append(a)
     rare = {c: ws for c, ws in holders_of.items() if 2 <= len(ws) <= RARE_MAX}
@@ -241,7 +301,20 @@ async def scan(chain, d, wallets, timing=None):
     # receipts only for the coins behind pairs that could qualify (a real-buy check on every rare coin costs ~30 s)
     need = {(c, a) for c, ws in rare.items() for a in ws
             if any(tog[(a, b) if a < b else (b, a)] >= 2 for b in ws if b != a)}
+    # receipts are the costly part (SpaceXCoin: 7,461 -> ~25 s of node time that starved the quick pass and the
+    # profiles): key wallets' coins first, then the pairs with the most coins together; the rest stays 'unread' (kept)
+    core0 = set(core or [])
+    best = Counter()
+    for c, ws in rare.items():
+        for i, a in enumerate(ws):
+            for b in ws[i + 1:]:
+                p = (a, b) if a < b else (b, a)
+                best[(c, a)] = max(best[(c, a)], tog[p]); best[(c, b)] = max(best[(c, b)], tog[p])
+    need = sorted(need, key=lambda k: (k[1] not in core0, -best[k]))
+    capped = need[RECEIPT_CAP:]
+    need = need[:RECEIPT_CAP]
     ok, unread = await _real_buys({(chain, c, a): first[(c, a)][1] for c, a in need})
+    unread = set(unread) | {(chain, c, a) for c, a in capped}
     keep = {(c, a) for (_, c, a) in ok | unread} | {(c, a) for c, ws in rare.items() for a in ws if (c, a) not in need}
     shared, tog, tight = count(keep)
     fb = {h["addr"]: (h.get("first") or {}).get("ts") for h in wallets if (h.get("first") or {}).get("kind") == "bought"}
@@ -249,6 +322,21 @@ async def scan(chain, d, wallets, timing=None):
         a, b = p
         if fb.get(a) and fb.get(b) and abs(fb[a] - fb[b]) <= 60:
             tog[p] += 1; tight[p] += 1; shared[p] += 1
+
+    # LEADER pairs among the key wallets (top holders, big exited buyers, dev): one wallet buys first and the other
+    # follows seconds to minutes later, coin after coin = copy-trade or one person's side wallet. Coins are 'rare' here
+    # relative to the key wallets: across 756 holders a trending coin has > 10 buyers and the pattern vanished
+    # (SpaceXCoin #1 -> #12: 6 of 6 coins, #1 first by 20-375 s, and 29 s first on this token).
+    core_set = set(core or []) & set(H)
+    rare_core = {}
+    for c, ws in holders_of.items():
+        k = [a for a in ws if a in core_set and (c, a) in keep]
+        if 2 <= len(k) <= RARE_MAX:
+            rare_core[c] = k
+
+    from lib.wprofile import leader_pairs
+    byc = {c: {a: first[(c, a)][0] for a in ws} for c, ws in rare_core.items()}
+    leaders = leader_pairs(byc, {c: {} for c in byc}, {a: t for a, t in fb.items() if a in core_set}, BORING)
 
     def is_strong(p):
         # overlap must be big RELATIVE to how much the wallets trade: two bots that buy every trending coin share
@@ -260,15 +348,69 @@ async def scan(chain, d, wallets, timing=None):
     from lib.wprofile import tight_groups
     groups = tight_groups(strong, lambda p: (tight[p], tog[p], shared[p]))
     pct = {h["addr"]: h.get("pct") or 0 for h in wallets}
+    def detail(p):
+        """How the pair buys together: same block (one operator's script), and who goes first (a leader and a follower
+        = copy-trade or one person's side wallet). SpaceXCoin: 0x19dd/0xde2c 127 of 127 coins in the same block (one bot);
+        #1 first on 8 of 8 coins with #4 / #12 20-70 s behind (followers)."""
+        a, b = p
+        same = lead_a = lead_b = 0
+        dts = []
+        for c, ws in rare.items():
+            if (c, a) not in keep or (c, b) not in keep or a not in ws or b not in ws:
+                continue
+            ta, tb = first[(c, a)], first[(c, b)]
+            dt = tb[0] - ta[0]
+            if abs(dt) > TOG:
+                continue
+            if ta[2] and ta[2] == tb[2]:
+                same += 1
+                continue
+            dts.append(abs(dt))
+            if dt > 0:
+                lead_a += 1
+            elif dt < 0:
+                lead_b += 1
+        fa, fb_ = fb.get(a), fb.get(b)
+        this = (fb_ - fa) if fa and fb_ else None
+        n = same + lead_a + lead_b
+        kind = None
+        if n >= 3 and same >= 0.6 * n:
+            kind = "same block"
+        elif lead_a + lead_b >= 3 and max(lead_a, lead_b) >= 0.8 * (lead_a + lead_b):
+            kind = "leader"
+        return {"same": same, "lead": (lead_a, lead_b), "median_dt": int(sorted(dts)[len(dts) // 2]) if dts else None,
+                "this_dt": this, "kind": kind}
     clusters = []
     for g in groups:
         g.sort(key=lambda a: -pct.get(a, 0))
         prs = sorted([p for p in strong if p[0] in g and p[1] in g], key=lambda p: (-tight[p], -tog[p], -shared[p]))
         clusters.append({"who": g, "pct": sum(pct.get(a, 0) for a in g),
-                         "pairs": [(a, b, shared[(a, b)], tog[(a, b)], tight[(a, b)], min(ncoins[a], ncoins[b])) for a, b in prs]})
+                         "pairs": [(a, b, shared[(a, b)], tog[(a, b)], tight[(a, b)], min(ncoins[a], ncoins[b]), detail((a, b))) for a, b in prs]})
     clusters.sort(key=lambda c: -c["pct"])
+
+    # --- 4. the dev's OTHER coins: who was in within 60 s of their launch (the dev's own sniper / insider wallets
+    #     follow it from coin to coin; SpaceXCoin: 0x6d3e bought 4 blocks in, sniped the dev's next coin 1 s after
+    #     launch, then got 1.149 BNB from the dev)
+    dev_coins = []
+    if devs:
+        from lib import explorer as exmod, who
+        rpc1, ex = RPC(chain), exmod.Explorer(chain)
+        for dv in devs[:2]:
+            try:
+                txs = await asyncio.wait_for(ex.txlist(dv, limit=300), 15)
+                past = await asyncio.wait_for(who.past_coins(rpc1, ex, dv, token, txs or []), 15)
+            except Exception:
+                continue
+            for pc in past:
+                c = pc["ca"]
+                t_launch = first[(c, dv)][0] if (c, dv) in first else pc.get("launched")
+                if not t_launch:
+                    continue
+                inn = sorted(((first[(c, a)][0] - t_launch, a) for a in A if a != dv and (c, a) in first
+                              and -5 <= first[(c, a)][0] - t_launch <= 60), key=lambda x: x[0])
+                dev_coins.append({**pc, "dev": dv, "early": [(a, int(dt)) for dt, a in inn]})
     if timing is not None:
         timing["all-holder clusters"] = time.time() - t0
     notes.append(f"all-holder history: {len(H)} wallets; {len(rare)} rare coins shared by 2-{RARE_MAX} holders, "
                  f"{sum(1 for k in spray)} airdrop txs dropped, {len(ok)} real buys; {dep_n} shared deposit address(es)")
-    return {"links": links, "clusters": clusters, "notes": notes}
+    return {"links": links, "clusters": clusters, "notes": notes, "dev_coins": dev_coins, "leaders": leaders}

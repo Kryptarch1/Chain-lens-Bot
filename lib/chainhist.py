@@ -165,7 +165,7 @@ def render(hist, now):
     return L
 
 
-async def home_logs(chain, addrs, now, days=30):
+async def home_logs(chain, addrs, now, days=30, outgoing=True):
     """Fallback when the home chain's explorer can't list a wallet's history (BSC/Base/Robinhood on the free Etherscan
     key): the wallets' token transfers of the last `days` days from one multi-wallet Transfer log scan on our own node
     (no HyperSync: its free plan is the scarce resource). -> {addr: tokentx-shaped rows, newest first}; timestamps are
@@ -179,7 +179,7 @@ async def home_logs(chain, addrs, now, days=30):
     spb = days * 86400 / max(1, latest - b0)
     pads = [pad_addr(a) for a in addrs]
     ins, outs = await asyncio.gather(rpc._rpc_logs(None, [TRANSFER, None, pads], b0, latest, None),
-                                     rpc._rpc_logs(None, [TRANSFER, pads], b0, latest, None))
+                                     rpc._rpc_logs(None, [TRANSFER, pads], b0, latest, None) if outgoing else asyncio.sleep(0, []))
     aset, out = set(addrs), defaultdict(list)
     for l in ins + outs:
         t = l.get("topics") or []

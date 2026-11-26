@@ -65,6 +65,14 @@ def _clean(s):
 
 
 async def _post(chain, method, params, timeout=40, low=False):
+    """Single-flight: the quick pass and the all-holder pass start together and ask for the same wallets' funding /
+    history; one request serves both (the free plan's ~8 calls/s is the bottleneck)."""
+    import json
+    return await cache.once(("alch", chain, method, json.dumps(params, sort_keys=True)),
+                            lambda: _post_run(chain, method, params, timeout, low))
+
+
+async def _post_run(chain, method, params, timeout=40, low=False):
     global _sem
     if _sem is None:
         _sem = asyncio.Semaphore(16)

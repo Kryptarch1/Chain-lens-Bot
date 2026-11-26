@@ -209,13 +209,41 @@ TAIL_CAP = 700
 CLUSTER_BUCKET = "same-coin clusters (copy-trade / one trader, not proof)"
 
 
-async def collect(chain, token, top=25, profile=20, full=False):
+async def _kinds(rpc, addrs):
+    """nonce + code for each address -> {addr: {'nonce', 'kind'}}. A lookup that comes back empty is retried once and
+    then marked kind 'unknown' (never 'wallet' with 0 txs): under load a failed nonce read turned an exchange hot wallet
+    (268k txs) into a '0 txs' private funder and created a false PROVEN 'same first funder' link (SpaceXCoin, gake)."""
+    out = {}
+    todo = list(addrs)
+    for attempt in range(2):
+        if not todo:
+            break
+        r = await rpc.batch([("eth_getTransactionCount", [f, "latest"]) for f in todo] + [("eth_getCode", [f, "latest"]) for f in todo])
+        miss = []
+        for i, f in enumerate(todo):
+            n, c = r[i], r[len(todo) + i]
+            if n is None or c is None:
+                miss.append(f)
+                continue
+            n = int(n, 16)
+            out[f] = {"nonce": n, "kind": "contract" if (len(c) > 2 and not delegation_7702(c)) else "exchange/service" if n >= EXCHANGE_NONCE else "wallet"}
+        todo = miss
+    for f in todo:
+        out[f] = {"nonce": None, "kind": "unknown"}
+    return out
+
+
+async def collect(chain, token, top=25, profile=20, full=False, deadline=None, after=None):
     """full=True: also profile EVERY wallet holding >= 0.01% of supply (role 'small holder'), so the links and groups
     cover the whole holder base, not just the top wallets. Their funders come from our archive node (lib/nodefund)."""
     t0 = time.time()
     rpc, ex = RPC(chain), explorer.Explorer(chain)
     token = token.lower()
     notes, timing = [], {}
+
+    def budget(cap, reserve=0):
+        """seconds a step may take: its own cap, clamped to the run's deadline minus what later steps need"""
+        return max(2.0, min(cap, deadline - time.time() - reserve)) if deadline else cap
     from cmds.check import phase_a
     info = await phase_a(rpc, ex, chain, token)
     timing["token"] = time.time() - t0
@@ -234,8 +262,10 @@ async def collect(chain, token, top=25, profile=20, full=False):
     markets = await find_markets(rpc, rows, pools)
     pools |= set(markets)
     bal, act, start = replay(rows, pools)
+    t_lp = time.time()
     if await lp_moves(rpc, act):
         notes.append("liquidity adds / pulls by wallets are shown as such, not as sells / buys")
+    timing["markets+lp moves"] = time.time() - t_lp
     sym = rpc.cfg.get("symbol", "ETH")
     dec = info.get("decimals") or 18
 
@@ -266,8 +296,10 @@ async def collect(chain, token, top=25, profile=20, full=False):
     trk = tracked.load()
     trk_in = sorted(a for a in trk if a in act and a not in skip)  # tracked wallets that ever held this token
     cand = list(dict.fromkeys(by_bal + by_acq + coll + dist + feeders[:120] + sorted(devs) + tail + trk_in))
+    t_c = time.time()
     res = await rpc.batch([("eth_getCode", [a, "latest"]) for a in cand] +
                           [("eth_call", [{"to": token, "data": encode_call("balanceOf(address)", [a])}, "latest"]) for a in cand])
+    timing["balances"] = time.time() - t_c
     codes, bals = res[:len(cand)], res[len(cand):]
     supply = info.get("supply") or sum(v for v in bal.values() if v > 0) or 1
     hold, drift = {}, 0
@@ -299,7 +331,7 @@ async def collect(chain, token, top=25, profile=20, full=False):
     top_now = [a for a in by_bal if isw(a) and hold[a]["bal"] > 0]
     top_now = sorted(top_now, key=lambda a: -hold[a]["bal"])[:top]
     exited = [a for a in by_acq if isw(a) and a not in top_now and a not in devs and acq[a] >= supply * 0.003
-              and hold[a]["bal"] < acq[a] * 0.1][:25]
+              and hold[a]["bal"] < acq[a] * 0.1][:40 if full else 25]
     coll_w = [a for a in coll if isw(a)]
     dist_w = [a for a in dist if isw(a) and a not in devs]
     feed_w = [a for a in feeders if isw(a)]
@@ -319,6 +351,29 @@ async def collect(chain, token, top=25, profile=20, full=False):
     W = W0 + tail_w
     tail_set = set(tail_w)
     wallets = [hold[a] for a in W]
+    hist_task = None
+    from lib import alchemy as _al0
+    if full and (_al0.available(chain) or rpc.private):
+        # holder histories start NOW, alongside the funder lookups (they only need the wallet list)
+        from lib import holdernet
+        try:
+            cb = await rpc.call("eth_getBlockByNumber", [hex(info["created_block"]), False])
+            age_d = (time.time() - int(cb["timestamp"], 16)) / 86400
+        except Exception:
+            age_d = 30
+        # history window: coins < 1 day old run on a 60 s budget -> 3 days (snipers / bundles / copy-traders buy
+        # dozens of coins a day, 3 days shows them); < 3 days -> 7; older coins (120 s budget) -> 14
+        net_days = 3 if age_d <= 1 else 7 if age_d <= 3 else 14
+        hist_task = asyncio.ensure_future(holdernet.load(chain, W, {a: hold[a]["pct"] for a in W}, sorted(devs),
+                                                         core=W0, days=net_days, deadline=deadline))
+    if after is not None:
+        # the all-holder pass runs alongside the quick pass: its heavy part (hundreds of funder searches, receipts)
+        # waits until the quick pass is printed, so the user's first answer is not slowed (8 s alone vs 18-26 s when
+        # both hit the node at once); its history load above is light and already running
+        try:
+            await asyncio.wait_for(after.wait(), budget(30, 30))
+        except Exception:
+            pass
 
     # --- per wallet: the tx that first gave it tokens, block times, tx count, native balance, first funder
     first_txs = sorted({act[a]["first"]["tx"] for a in W if act[a]["first"]})
@@ -371,7 +426,7 @@ async def collect(chain, token, top=25, profile=20, full=False):
             nn = {a: int(r0[i], 16) if r0[i] else 0 for i, a in enumerate(miss)}
             bb = {a: int(r0[n + i], 16) if r0[n + i] else 0 for i, a in enumerate(miss)}
             try:
-                nf = await asyncio.wait_for(nodefund.first_funding_many(chain, miss, nn, bb, latest), 240 if node else 90)
+                nf = await asyncio.wait_for(nodefund.first_funding_many(chain, miss, nn, bb, latest), budget(240 if node else 90, 20))
             except Exception as e:
                 nf = {a: {"error": type(e).__name__} for a in miss}
             for a in miss:
@@ -423,12 +478,7 @@ async def collect(chain, token, top=25, profile=20, full=False):
     # --- funders: exchange / contract / plain wallet; one more hop for plain wallets; bridge payouts matched to their origin
     t = time.time()
     F = sorted({h["funder"] for h in wallets if h["funder"]})
-    fr = await rpc.batch([("eth_getTransactionCount", [f, "latest"]) for f in F] + [("eth_getCode", [f, "latest"]) for f in F]) if F else []
-    fk = {}
-    for i, f in enumerate(F):
-        n = int(fr[i], 16) if fr[i] else 0
-        c = fr[len(F) + i] or "0x"
-        fk[f] = {"nonce": n, "kind": "contract" if (len(c) > 2 and not delegation_7702(c)) else "exchange/service" if n >= EXCHANGE_NONCE else "wallet"}
+    fk = await _kinds(rpc, F) if F else {}
     # a busy funder (>= 1,000 txs) or one shared by several holders may be a payout service (an exchange hot wallet,
     # a bridge solver, a trading app's withdrawal wallet) that pays out to many people: then sharing it proves nothing
     shared = Counter(h["funder"] for h in wallets if h["funder"])
@@ -453,7 +503,27 @@ async def collect(chain, token, top=25, profile=20, full=False):
             return f"pays out to many wallets: {len(rec)} recipients in its last {len(tl)} txs ({span:.0f} h)"
         return None
     fund_txs = sorted({h["fund_tx"] for h in wallets if h.get("fund_tx")})
-    svc_res, ftx = await asyncio.gather(asyncio.gather(*[payout_service(f) for f in svc_check]),
+    async def payout_service_t(f):
+        # capped: one slow explorer read held the quick pass for 26 s (SpaceXCoin); a busy funder that is not read in
+        # time is treated like the node-only case (>= 1,000 txs = a service, sharing it proves nothing)
+        try:
+            return await asyncio.wait_for(payout_service(f), 8)
+        except Exception:
+            return f"busy wallet ({fk[f]['nonce']:,} txs; payouts not read in time), treated as a service" if fk[f]["nonce"] >= 1000 else None
+    async def all_services():
+        # one 5 s cap for ALL of them (they share the explorer / Alchemy pacer; per-funder caps still added up to 20 s)
+        ts = [asyncio.ensure_future(payout_service_t(f)) for f in svc_check]
+        if ts:
+            await asyncio.wait(ts, timeout=5)
+        out = []
+        for f, t in zip(svc_check, ts):
+            if t.done() and not t.exception():
+                out.append(t.result())
+            else:
+                t.cancel()
+                out.append(f"busy wallet ({fk[f]['nonce']:,} txs; payouts not read in time), treated as a service" if fk[f]["nonce"] >= 1000 else None)
+        return out
+    svc_res, ftx = await asyncio.gather(all_services(),
                                         rpc.batch([("eth_getTransactionByHash", [x]) for x in fund_txs]) if fund_txs else asyncio.sleep(0, []))
     for f, why in zip(svc_check, svc_res):
         if why:
@@ -494,11 +564,7 @@ async def collect(chain, token, top=25, profile=20, full=False):
         fk[f]["funder"] = ((r or {}).get("from") or "").lower() or None
     G = sorted({v["funder"] for v in fk.values() if v.get("funder")} - set(fk))
     if G:
-        gr = await rpc.batch([("eth_getTransactionCount", [g, "latest"]) for g in G] + [("eth_getCode", [g, "latest"]) for g in G])
-        for i, g in enumerate(G):
-            n = int(gr[i], 16) if gr[i] else 0
-            c = gr[len(G) + i] or "0x"
-            fk[g] = {"nonce": n, "kind": "contract" if (len(c) > 2 and not delegation_7702(c)) else "exchange/service" if n >= EXCHANGE_NONCE else "wallet"}
+        fk.update(await _kinds(rpc, G))
     for h, b in zip(maybe_bridge, br):
         if b:
             src = "solana" if b["chain_id"] == SOLANA_ID else CHAIN_BY_ID.get(b["chain_id"], str(b["chain_id"]))
@@ -524,9 +590,15 @@ async def collect(chain, token, top=25, profile=20, full=False):
     n_signed = Counter((h.get("first") or {}).get("signer") for h in wallets)
     top_signers = {(h.get("first") or {}).get("signer") for h in wallets if h["addr"] not in tail_set}
     chk = [x for x in signers if x not in relayer and sk[x] >= 50 and (x in top_signers or n_signed[x] >= 2)]
-    for x, r in zip(chk, await asyncio.gather(*[app_relayer(x) for x in chk])):
+    t_sg = time.time()
+    tasks = [asyncio.ensure_future(app_relayer(x)) for x in chk]
+    if tasks:
+        await asyncio.wait(tasks, timeout=5)  # one cap for all: per-signer txlists queue behind the shared pacer
+    for x, tk in zip(chk, tasks):
+        r = tk.result() if tk.done() and not tk.exception() else (tk.cancel() and False) or sk[x] >= 1000
         if r:
             relayer.add(x)
+    timing["signers"] = time.time() - t_sg
     by_relayer = defaultdict(list)
     for h in wallets:
         f = h.get("first") or {}
@@ -535,6 +607,7 @@ async def collect(chain, token, top=25, profile=20, full=False):
             f["signer_relayer"] = f["signer"] in relayer
 
     # --- links
+    t_lk = time.time()
     L = Links()
     Wset = set(W)
     by_f, by_g, by_origin, by_signer = defaultdict(list), defaultdict(list), defaultdict(list), defaultdict(list)
@@ -576,9 +649,9 @@ async def collect(chain, token, top=25, profile=20, full=False):
         signer = {t: (x or {}).get("from", "").lower() for t, x in zip(multi, fs)}
         sg = sorted({v for v in signer.values() if v})
         sn = await rpc.batch([("eth_getTransactionCount", [v, "latest"]) for v in sg]) if sg else []
-        sn = {v: int(n or "0x0", 16) for v, n in zip(sg, sn)}
+        sn = {v: int(n, 16) for v, n in zip(sg, sn) if n}  # a failed read is unknown, never '0 txs' (false PROVEN link)
         for t, ws in multi.items():
-            if signer.get(t) and sn.get(signer[t], 0) < 1000:
+            if signer.get(t) and signer[t] in sn and sn[signer[t]] < 1000:
                 for w in ws[1:]:
                     L.join(ws[0], w, f"first {sym} for {len(ws)} holders came in ONE tx {t} signed by {signer[t]} "
                                      f"({sn[signer[t]]} txs): one wallet funded them all")
@@ -626,13 +699,15 @@ async def collect(chain, token, top=25, profile=20, full=False):
     net = None
     from lib import alchemy as _al
     # chains without Alchemy but with our own node (rh, arc): node logs instead (holdernet._hist_logs)
-    if full and (_al.available(chain) or RPC(chain).private):
-        # every checked holder's full history: sends between holders, shared exchange deposit addresses (proof) and
+    if hist_task is not None:
+        # every checked holder's history: sends between holders, shared exchange deposit addresses (proof) and
         # same-rare-coin clusters (pattern) across the whole holder base
         from lib import holdernet
         t = time.time()
         try:
-            net = await asyncio.wait_for(holdernet.scan(chain, {"token": token, "native": sym}, wallets, timing), 300)
+            loaded = await asyncio.wait_for(hist_task, budget(150, 6))
+            net = await asyncio.wait_for(holdernet.scan(chain, {"token": token, "native": sym, "devs": sorted(devs)}, wallets, timing,
+                                                         days=net_days, deadline=deadline, core=W0, loaded=loaded), budget(120, 1))
             for a, b, why in net["links"]:
                 if a in Wset and b in Wset:
                     L.join(a, b, why)
@@ -777,6 +852,7 @@ async def collect(chain, token, top=25, profile=20, full=False):
         tr_rows.append(r)
     tr_rows.sort(key=lambda r: (-(r.get("pct") or 0), -(r.get("got_pct") or 0)))
 
+    timing["links+groups"] = time.time() - t_lk
     pair0 = pairs[0] if pairs else {}
     out = {"chain": chain, "token": token, "name": info.get("name"), "symbol": info.get("symbol"), "decimals": dec, "supply": supply,
             "native": sym, "devs": sorted(devs), "created_block": info["created_block"], "created_ts": bts.get(info["created_block"]),
@@ -785,7 +861,7 @@ async def collect(chain, token, top=25, profile=20, full=False):
             "n_transfers": len(rows), "n_holders": sum(1 for a, v in bal.items() if v > 0 and a not in skip), "n_ever": sum(1 for a in act if a not in skip), "pools": sorted(pools), "markets": markets,
             "hold": sorted(hold.values(), key=lambda h: -h["bal"]), "wallets": wallets, "funders": fk, "groups": groups,
             "possible": possible, "notes": notes, "timing": timing, "full": full, "breakdown": breakdown,
-            "net_clusters": (net or {}).get("clusters"), "tracked": tr_rows, "n_tracked_list": len(trk)}
+            "net_clusters": (net or {}).get("clusters"), "dev_coins": (net or {}).get("dev_coins"), "leaders": (net or {}).get("leaders"), "net_days": net_days if hist_task is not None else None, "tracked": tr_rows, "n_tracked_list": len(trk)}
     if profile:
         t = time.time()
         from lib import wprofile
@@ -859,10 +935,11 @@ def _funder_text(d, h):
         return "funder: not found"
     k = d["funders"].get(fu, {})
     amt = f"{h['fund_amt']:.4g} {d['native']} " if h.get("fund_amt") else ""
-    line = f"funded {amt}by {fu} ({k.get('kind')}, {k.get('nonce', 0):,} txs" + (f"; {k['why']}" if k.get("why") else "") + ")"
+    n = lambda x: f"{x:,}" if isinstance(x, int) else "?"
+    line = f"funded {amt}by {fu} ({k.get('kind')}, {n(k.get('nonce'))} txs" + (f"; {k['why']}" if k.get("why") else "") + ")"
     if k.get("funder"):
         k2 = d["funders"].get(k["funder"], {})
-        line += f" ← {k['funder']} ({k2.get('kind')}, {k2.get('nonce', 0):,} txs)"
+        line += f" ← {k['funder']} ({k2.get('kind')}, {n(k2.get('nonce'))} txs)"
     return line
 
 
@@ -1070,9 +1147,24 @@ def render_full(d, deep=None):
                              + (" · sold %.0f%%" % (100 * h["sold"] / max(1, h["bought"] + h["received"] + h["minted"])) if h["sold"] else "") + tag(a))
             if len(c["who"]) > 8:
                 L.append(f"     … +{len(c['who']) - 8} more")
-            for a, b, n, t, t1, m in c["pairs"][:3]:
+            for a, b, n, t, t1, m, *det in c["pairs"][:3]:
+                x = det[0] if det else {}
+                how = (f" · {x['same']} in the SAME BLOCK (one operator's script)" if x.get("kind") == "same block" else
+                       f" · {'first' if x['lead'][0] > x['lead'][1] else 'second'} on {max(x['lead'])} of {sum(x['lead'])}" if x.get("kind") == "leader" else "")
                 L.append(f"     - {('#%d' % rank[a]) if a in rank else a[:10]} + {('#%d' % rank[b]) if b in rank else b[:10]}: "
-                         f"{n} rare coins in common, {t} bought within 10 min of each other ({t1} within 60 s); the less active one traded {m} coins")
+                         f"{n} rare coins in common, {t} bought within 10 min of each other ({t1} within 60 s); the less active one traded {m} coins{how}")
+    lead = d.get("leaders") or []
+    if lead:
+        L.append(f"LEADERS / FOLLOWERS (key wallets, last {d.get('net_days', 7)} d; pattern, not proof): one wallet buys, the other follows seconds-minutes later, coin after coin")
+        for x in lead[:10]:
+            fa, fo = x["leader"], x["follower"]
+            L.append(f"   {('#%d' % rank[fa]) if fa in rank else fa} -> {('#%d' % rank[fo]) if fo in rank else fo}: followed on {x['led']} of {x['of']} coins, "
+                     f"median {x['median_dt']} s later" + (f", {x['this_dt']} s later on this coin" if x.get("this_dt") is not None else ""))
+    dcs = d.get("dev_coins") or []
+    for dc in dcs:
+        early = [(a, dt) for a, dt in dc.get("early") or [] if a != dc.get("dev")]
+        L.append(f"DEV'S OTHER COIN {dc['symbol']} {dc['ca']} ({dc.get('state')}): "
+                 + (("in within 60 s of its launch: " + ", ".join(f"{('#%d' % rank[a]) if a in rank else a} +{dt}s" for a, dt in early[:10])) if early else "none of these wallets bought it in its first minute"))
     bl = [p for p in d["possible"] if p["kind"].startswith("first buy in the same block") or p["kind"].startswith("funded by the dev")]
     if bl:
         L.append("POSSIBLE (all holders)")
@@ -1081,5 +1173,8 @@ def render_full(d, deep=None):
     miss = [n for n in d["notes"] if n.startswith("funder of ") and " not found" in n]
     if miss:
         L.append(f"   funder not found for {len(miss)} wallet(s) (they can't be linked by funding)")
+    for n in d["notes"]:  # the all-holder history notes (what was read, what failed) belong in the output
+        if n.startswith(("holder histories", "holder token-transfer history", "all-holder history", "history not read", "all-holder history scan failed")):
+            L.append(f"   {n}")
     L.append(f"   ({d['secs']}s: " + ", ".join(f"{k} {v}s" for k, v in d["timing"].items()) + ")")
     return "\n".join(L)

@@ -79,7 +79,7 @@ def tight_groups(pairs, score):
 
 
 async def _ds_tokens(chain, tokens):
-    """DexScreener: token -> best pair (by liquidity) {'symbol','price','liq','mcap','created'}. Cached 10 min."""
+    """DexScreener: token -> best pair (by liquidity) {'symbol','price','liq','mcap','created'}. Cached 30 min (no pool: 2 h)."""
     ds = explorer.CHAINS.get(chain, {}).get("dexscreener") or chain
     out, todo = {}, []
     for t in tokens:
@@ -113,17 +113,43 @@ async def _ds_tokens(chain, tokens):
     for t in todo:
         v = best.get(t, {})
         out[t] = v
-        cache.set(f"ds2:{chain}:{t}", v, ttl=600)
+        # 30 min: the same meme coins come back in every holder check; price moves don't change alive/dead or
+        # 'now >= $1M' within that window. No pool at all = 2 h (a dead coin stays dead).
+        cache.set(f"ds2:{chain}:{t}", v, ttl=1800 if v else 7200)
     return out
+
+
+async def _native_price(ch):
+    """USD price of the chain's native coin from its wrapped token's deepest DexScreener pair, whichever side it is on
+    (WBNB is usually the QUOTE token on BSC: reading only base-side pairs gave $0 and 56 BNB showed as '$467')."""
+    w = WRAPPED.get(ch)
+    if not w:
+        return 0
+    c = cache.get(f"natprice:{ch}")
+    if c:
+        return c
+    ds = explorer.CHAINS.get(ch, {}).get("dexscreener") or ch
+    d = await explorer._get(f"https://api.dexscreener.com/tokens/v1/{ds}/{w}", timeout=10)
+    best, px = -1, 0
+    for p in d if isinstance(d, list) else []:
+        liq = (p.get("liquidity") or {}).get("usd") or 0
+        if liq <= best:
+            continue
+        pu, pn = float(p.get("priceUsd") or 0), float(p.get("priceNative") or 0)
+        if ((p.get("baseToken") or {}).get("address") or "").lower() == w and pu:
+            best, px = liq, pu
+        elif ((p.get("quoteToken") or {}).get("address") or "").lower() == w and pu and pn:
+            best, px = liq, pu / pn
+    if px:
+        cache.set(f"natprice:{ch}", px, ttl=600)
+    return px
 
 
 async def _prices():
-    """Native coin prices in USD from DexScreener (wrapped tokens)."""
-    out = {}
-    for ch in WEALTH_CHAINS:
-        info = await _ds_tokens(ch, [WRAPPED[ch]])
-        out[ch] = (info.get(WRAPPED[ch]) or {}).get("price") or 0
-    return out
+    """Native coin prices in USD (wrapped tokens' deepest pair, either side)."""
+    chs = list(WEALTH_CHAINS)
+    res = await asyncio.gather(*[_native_price(ch) for ch in chs], return_exceptions=True)
+    return {ch: (r if isinstance(r, (int, float)) else 0) for ch, r in zip(chs, res)}
 
 
 async def _wealth(addrs, prices, home=None):
@@ -169,9 +195,14 @@ def _ts(x):
         return None
 
 
-async def profile_all(chain, d, n=20):
-    """Profile the top `n` holders now + the dev. Adds h['profile'] to d['wallets'] entries; returns notes."""
+async def profile_all(chain, d, n=20, deadline=None):
+    """Profile the top `n` holders now + the dev. Adds h['profile'] to d['wallets'] entries; returns notes.
+    deadline (absolute time): every slow stage is clamped to it, so a tight budget gives PARTIAL profiles (a stage that
+    runs out returns empty and says so) instead of none (SpaceXCoin: one outer timeout threw all 20 away)."""
     t0 = time.time()
+
+    def cap(x, margin=0):
+        return max(1.0, min(x, deadline - time.time() - margin)) if deadline else x
     ex, rpc = explorer.Explorer(chain), RPC(chain)
     token = d["token"]
     targets = [h for h in d["wallets"] if "holder" in h["roles"]][:n]
@@ -188,8 +219,8 @@ async def profile_all(chain, d, n=20):
             return [], []  # the explorer's fallback (HyperSync txlist, 15 req/min) costs ~25 s a wallet when rate limited
         async with sem:
             try:
-                tl, tt = await asyncio.gather(asyncio.wait_for(ex.txlist(a, limit=300), 60),
-                                              asyncio.wait_for(ex.tokentx(a, limit=1000), 60))
+                tl, tt = await asyncio.gather(asyncio.wait_for(ex.txlist(a, limit=300), cap(60, 14)),
+                                              asyncio.wait_for(ex.tokentx(a, limit=1000), cap(60, 14)))
                 return tl or [], tt or []
             except Exception as e:
                 notes.append(f"history of {a} not read ({type(e).__name__})")
@@ -199,7 +230,7 @@ async def profile_all(chain, d, n=20):
 
     async def xc():
         try:
-            return await asyncio.wait_for(xchain.collect(chain, addrs, d["now"]), 150)
+            return await asyncio.wait_for(xchain.collect(chain, addrs, d["now"]), cap(150, 6))
         except Exception as e:
             return {}, [f"cross-chain activity failed ({type(e).__name__})"]
     xc_task = asyncio.create_task(xc())
@@ -209,7 +240,7 @@ async def profile_all(chain, d, n=20):
         """Other-chain history starts as soon as the cheap tx counts are in (not after the slow 7-day coin scans and
         bridge lookups): the wallet's top 4 other chains by recent activity."""
         chains = [c for c in xchain.private_chains() if c != chain]
-        res = await asyncio.gather(*[asyncio.wait_for(xchain._activity(c, addrs, d["now"]), 30) for c in chains], return_exceptions=True)
+        res = await asyncio.gather(*[asyncio.wait_for(xchain._activity(c, addrs, d["now"]), cap(30, 10)) for c in chains], return_exceptions=True)
         pairs = []
         for a in addrs:
             cand = {}
@@ -222,7 +253,7 @@ async def profile_all(chain, d, n=20):
             pairs += [(a, c) for c, _ in sorted(cand.items(), key=lambda kv: -kv[1])[:4]]
         if not pairs:
             return {}
-        return await asyncio.wait_for(chainhist.collect(pairs, d["now"], await prices_task), 150)
+        return await asyncio.wait_for(chainhist.collect(pairs, d["now"], await prices_task), cap(150, 6))
     oh_task = asyncio.create_task(other_hist())
 
     busy = set()
@@ -372,7 +403,10 @@ async def profile_all(chain, d, n=20):
             names[c] = s.get("name") or None
         except Exception:
             names[c] = None
-    await asyncio.gather(*[nm(c) for c in to_name[:25]])
+    # names are nice-to-have: cached forever once verified, never allowed to hold the profiles up
+    nm_tasks = [asyncio.ensure_future(nm(c)) for c in to_name[:25]]
+    if nm_tasks:
+        await asyncio.wait(nm_tasks, timeout=4)
     tm["coins+names"] = time.time() - t0
     wealth = await wealth_task
     xc_res, xc_notes = await xc_task
@@ -423,7 +457,7 @@ async def profile_all(chain, d, n=20):
             early = bool(i.get("created") and k["first"] and k["first"] - i["created"] <= 3600)
             state = "no pool" if not i else ("dead" if (i.get("liq") or 0) < 1000 else "alive")
             coins.append({"token": c, "name": i.get("name"), "symbol": i.get("symbol") or k["symbol"], "first": k["first"], "first_tx": k.get("first_tx"), "state": state,
-                          "mcap": i.get("mcap"), "liq": i.get("liq"), "early": early, "rwa": bool(i.get("rwa"))})
+                          "mcap": i.get("mcap"), "liq": i.get("liq"), "early": early, "rwa": bool(i.get("rwa")), "created": i.get("created")})
         coins.sort(key=lambda x: -(x["first"] or 0))
         now = d["now"]
         win = [x for x in coins if x["state"] == "alive" and (x["mcap"] or 0) >= 1_000_000 and (x["liq"] or 0) >= 50_000
@@ -451,10 +485,14 @@ async def profile_all(chain, d, n=20):
             "xchain": xc_res.get(a), "chain_hist": ch_hist.get(a),
         }
     try:
-        await asyncio.wait_for(_pre_buy(chain, d, targets), 30)
+        await asyncio.wait_for(_pre_buy(chain, d, targets), cap(30, 2))
     except Exception as e:
         notes.append(f"pre-buy nonce check failed ({type(e).__name__})")
-    d["shared"] = await shared_coins(d, targets)
+    try:
+        d["shared"] = await asyncio.wait_for(shared_coins(d, targets), cap(40, 0.5))
+    except Exception as e:
+        d["shared"] = {}
+        notes.append(f"shared coins / clusters / leaders not finished in the budget ({type(e).__name__})")
     notes.append(f"profiles: {len(targets)} wallets, history = newest 300 txs + 1000 token transfers each ({time.time() - t0:.1f}s; done at: "
                  + ", ".join(f"{k} {v:.0f}s" for k, v in tm.items()) + ")")
     return notes
@@ -478,9 +516,17 @@ async def _pre_buy(chain, d, targets):
             continue
         f = h["first"]
         signer = (f.get("signer") or "").lower()
-        h["profile"]["pre_buy"] = {"nonce": n0, "d7": n0 - n7, "d30": n0 - n30,
+        # coins it bought in the 30 / 7 days before this buy: an app trader's own nonce stays flat while it trades
+        # every day through the app's relayer (SpaceXCoin #1/#7/#8 were tagged DORMANT with 45-64 coins that month)
+        bt = f.get("ts")
+        cl = h["profile"].get("coin_list") or []
+        c30 = sum(1 for x in cl if bt and x.get("first") and bt - 30 * 86400 <= x["first"] < bt - 60)
+        c7 = sum(1 for x in cl if bt and x.get("first") and bt - 7 * 86400 <= x["first"] < bt - 60)
+        hist_from = h["profile"].get("history_from")
+        h["profile"]["pre_buy"] = {"nonce": n0, "d7": n0 - n7, "d30": n0 - n30, "coins7": c7, "coins30": c30,
+                                   "coins_window_ok": bool(hist_from and bt and hist_from <= bt - 30 * 86400) or len(cl) < 900,
                                    "age_days": (f["ts"] - h["fund_ts"]) / 86400 if f.get("ts") and h.get("fund_ts") else None,
-                                   "app": bool(signer) and signer != h["addr"] and n0 <= 5}
+                                   "app": bool(signer) and signer != h["addr"] and (n0 <= 5 or c30 > n0 - n30)}
 
 
 def _pre_buy_line(d, p):
@@ -490,13 +536,17 @@ def _pre_buy_line(d, p):
     age = pb["age_days"]
     s = "     before this buy: " + (f"wallet age {age:.1f} d (first funding)" if age is not None and age < 2 else
                                     f"wallet age {age:.0f} d (first funding)" if age is not None else "wallet age ? (funder not found)")
+    c30, c7 = pb.get("coins30") or 0, pb.get("coins7") or 0
     if pb["app"]:
-        return s + f" · app / smart account (its own nonce {pb['nonce']} says nothing: an app relayer signs its trades)"
-    s += f" · {pb['nonce']} own txs ever · {pb['d7']} in the 7 d and {pb['d30']} in the 30 d before buying"
+        s += f" · trades through an app (own nonce {pb['nonce']} says nothing) · bought {c30} coins in the 30 d and {c7} in the 7 d before"
+        if c30 == 0 and pb.get("coins_window_ok"):
+            s += "  ** DORMANT: no coin buys in the 30 d before **"
+        return s
+    s += f" · {pb['nonce']} own txs ever · {pb['d7']} in the 7 d and {pb['d30']} in the 30 d before buying · {c30} coins bought in those 30 d"
     other30 = sum((v.get("d30") or 0) for c, v in ((p.get("xchain") or {}).get("chains") or {}).items() if c != d["chain"])
-    if age is not None and age <= 3 and pb["nonce"] <= 20:
+    if age is not None and age <= 3:
         s += "  ** FRESH WALLET **"
-    elif pb["d30"] == 0 and pb["nonce"] >= 10:
+    elif pb["d30"] == 0 and pb["nonce"] >= 10 and c30 == 0:
         s += "  ** DORMANT 30+ d on " + d["chain"] + (" and every other chain **" if not other30 else f" ** ({other30} txs on other chains in 30 d)")
     elif pb["d7"] == 0 and pb["nonce"] >= 10:
         s += f"  (quiet the 7 d before buying)"
@@ -753,9 +803,55 @@ async def shared_coins(d, targets):
         clusters.append({"who": g, "ranks": [rank[a] + 1 for a in g], "pct": sum(pct[a] for a in g),
                          "pairs": [(rank[a] + 1, rank[b] + 1, shared[a, b], tog[a, b]) for a, b in sorted(prs, key=lambda p: (-tog[p], -shared[p]))]})
     clusters.sort(key=lambda c: -c["pct"])
-    return {"n_top": len(hs), "n10": min(10, len(hs)), "coins": out[:15], "clusters": clusters,
+    leaders = leader_pairs(by, meta, me, BORING, lambda a: rank[a] + 1)
+    return {"n_top": len(hs), "n10": min(10, len(hs)), "coins": out[:15], "clusters": clusters, "leaders": leaders,
             "spam_dropped": sum(spam.values()), "spam_coins": len(spam), "buys_checked": len(cand), "buys_unread": len(unread),
             "crowd": crowd, "n_pairs": len(hs) * (len(hs) - 1) // 2}
+
+
+def leader_pairs(by, meta, me, boring, label=None):
+    """LEADER -> FOLLOWER pairs: on small coins (not popular, not boring) one wallet buys first and the other follows
+    3 s - 10 min later, coin after coin = a copy-trader (or one person's side wallet) following that wallet. Buys in the
+    first 2 min after a coin launched are left out: there the fastest sniper is always 'first' (a race, not a lead).
+    Rule: >= 4 leads (this token's own buys <= 120 s apart count as one), >= 85% in one direction, median gap <= 3 min.
+    SpaceXCoin (bsc): #1 first on 6 of 6 small coins by 20-375 s with #12 following, and 29 s first on this token.
+    by: {coin key: {wallet: first buy ts}}; meta: {coin key: coin dict (mcap, state, symbol, created)}; me: this token's buys."""
+    lead = Counter()
+    gaps = defaultdict(list)
+    for k, w in by.items():
+        m = meta.get(k) or {}
+        if m.get("state") == "this token" or (m.get("symbol") or "").upper() in boring or ((m.get("mcap") or 0) >= 20e6 and m.get("state") == "alive"):
+            continue
+        ts = {a: t for a, t in w.items() if t}
+        if len(ts) < 2:
+            continue
+        t0 = m.get("created") or min(ts.values())
+        ws = sorted(ts, key=lambda a: ts[a])
+        for i, a in enumerate(ws):
+            for b in ws[i + 1:]:
+                dt = ts[b] - ts[a]
+                if dt > 600:
+                    break
+                if dt < 3 or ts[a] - t0 < 120:
+                    continue
+                lead[a, b] += 1
+                gaps[a, b].append(dt)
+    out = []
+    for (a, b), n in lead.items():
+        back = lead.get((b, a), 0)
+        if n < back:
+            continue
+        this = (me.get(b) - me.get(a)) if me.get(a) and me.get(b) else None
+        extra = 1 if this is not None and 3 <= this <= 120 else 0
+        tot = n + back + (1 if this is not None and 3 <= abs(this) <= 120 else 0)
+        if n + extra >= 4 and (n + extra) >= 0.85 * tot:
+            g = sorted(gaps[a, b])
+            med = g[len(g) // 2]
+            if med <= 180:
+                out.append({"leader": a, "follower": b, "led": n + extra, "of": tot, "median_dt": int(med), "this_dt": this,
+                            "label": (label(a), label(b)) if label else None})
+    out.sort(key=lambda x: -x["led"])
+    return out
 
 
 def render_shared(d):
@@ -787,4 +883,9 @@ def render_shared(d):
                  + "; ".join(f"#{a}+#{b}: {n} shared, {t} within 10 min" for a, b, n, t in c["pairs"][:6])
                  + "  -> one person, a copy-trader following another, or a group calling the same coins (not proof)")
         L.append("     " + " ".join(c["who"]))
+    for x in sh.get("leaders") or []:
+        la, fo = x.get("label") or ("?", "?")
+        L.append(f"   LEADER #{la} -> FOLLOWER #{fo}: #{fo} bought the same small coin after #{la} on {x['led']} of {x['of']} coins, median {x['median_dt']} s later"
+                 + (f", {x['this_dt']} s later on this token" if x.get("this_dt") is not None else "")
+                 + f"  -> copy-trader or one person's side wallet (not proof)   {x['leader']} -> {x['follower']}")
     return L
