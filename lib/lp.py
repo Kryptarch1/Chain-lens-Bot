@@ -1,7 +1,7 @@
 """LP ownership analysis for V2 / V3 / V4 / custom pools.
 Answers: who owns the liquidity, can they pull it, is it really locked.
 """
-import asyncio, time
+import asyncio, re, time
 from lib.rpc import RPC, RPCError, ZERO, DEAD, topic_addr, pad_addr
 from lib.evm import encode_call, decode1, decode_out, topic, addr as to_addr
 from lib import sigs, explorer, sim, args as argsmod
@@ -170,11 +170,84 @@ async def removal_powers(rpc, info, a, ctx=(), nft=False):
                 t2, p2 = await run(real)
                 if t2:
                     traced, pulls = (t2 + " (replayed real past calls)" if t2 != "pulls liquidity" else t2), p2
+        pending = False
+        if nft and info.get("verified") and traced != "pulls liquidity" and not (traced or "").startswith("runs, removes no liquidity"):
+            # can't be run standalone (e.g. *WithoutUnlock fns only work inside a swap's unlock): read its verified source
+            why, pending = await source_clears(rpc, a, sel, args)
+            if why:
+                traced = f"runs, removes no liquidity (verified source: {why})"
         callable_by = sorted(set(callable_by) | set(pulls))
-        results.append({"fn": nm, "args": args, "callable_by": callable_by, "traced": traced})
+        results.append({"fn": nm, "args": args, "callable_by": callable_by, "traced": traced, "src_pending": pending})
 
     await asyncio.gather(*[one(*c) for c in cands[:12]])
     return results
+
+
+_SRC_EXITS = re.compile(
+    r"BURN_POSITION|setApprovalForAll|delegatecall|callcode|\bmodifyLiquidity\s*\(|\bmulticall\s*\(|\.call\s*[({]|removeLiquidity|"
+    r"IERC721\s*\(|\w*(?:position|posm|nfpm|manager)\w*\s*\.\s*(?:approve|safeTransferFrom|transferFrom|burn)\s*\(|"
+    r"(?:safeTransferFrom|transferFrom)\s*\(\s*address\s*\(\s*this\s*\)", re.I)
+_ZERO_LIT = re.compile(r"^(?:0|0x0+|u?int\d*\s*\(\s*0\s*\))$")
+
+
+def _args_of(t, start):
+    """Top-level comma-separated args of the call whose '(' is at t[start]."""
+    depth, cur, out = 0, "", []
+    for ch in t[start:]:
+        if ch in "([{":
+            depth += 1
+            if depth == 1:
+                continue
+        elif ch in ")]}":
+            depth -= 1
+            if depth == 0:
+                out.append(cur.strip())
+                return out
+        if depth == 1 and ch == ",":
+            out.append(cur.strip()); cur = ""
+        elif depth >= 1:
+            cur += ch
+    return out
+
+
+def src_only_collects(code, args=""):
+    """Verified source of one LP-holder function (+ every internal fn it reaches) -> why it can't remove liquidity, or None.
+    Passes only when every liquidity decrease is a LITERAL 0 (= collect fees) and nothing moves/approves/burns the position
+    NFT, calls PoolManager.modifyLiquidity, delegatecalls or calls arbitrary targets. Conservative: anything unusual -> None."""
+    t = re.sub(r"//[^\n]*|/\*.*?\*/", "", code, flags=re.S)
+    if "bytes" in (args or "") or _SRC_EXITS.search(t):
+        return None
+    v4 = "DECREASE_LIQUIDITY" in t
+    v3 = re.search(r"\bdecreaseLiquidity\s*\(", t)
+    if v4:  # v4 DECREASE_LIQUIDITY params = abi.encode(tokenId, liquidity, amount0Min, amount1Min, hookData)
+        enc = [_args_of(t, m.end() - 1) for m in re.finditer(r"abi\.encode\s*\(", t)]
+        dec = [e for e in enc if len(e) >= 4]
+        if not dec or not all(_ZERO_LIT.match(e[1]) for e in dec):
+            return None
+    if v3:  # v3 DecreaseLiquidityParams({tokenId, liquidity, ...})
+        vals = re.findall(r"\bliquidity\s*:\s*([^,}\n]+)", t)
+        if not vals or not all(_ZERO_LIT.match(v.strip()) for v in vals):
+            return None
+    if v4 or v3:
+        return "its only liquidity call removes a fixed 0 = collects fees"
+    if re.search(r"modifyLiquidities|\bunlock\s*\(", t):  # touches the PositionManager with actions we can't see
+        return None
+    return "it never touches the liquidity"
+
+
+async def source_clears(rpc, a, sel, args, wait=6):
+    """-> (reason or None, pending). Reads the function's verified source (Slither, cached per contract); a cold compile that
+    doesn't fit `wait` keeps running in the background and caches itself for the next check."""
+    from lib import static
+    try:
+        r = await asyncio.wait_for(static.code(explorer.Explorer(rpc.name), a, sel), wait)
+    except asyncio.TimeoutError:
+        return None, True
+    except Exception:
+        return None, False
+    if not r or not r.get("ok"):
+        return None, False
+    return src_only_collects("\n".join(p.get("code") or "" for p in r.get("source") or []), args), False
 
 
 async def past_calls(rpc, a, sel, n=2):
@@ -577,7 +650,10 @@ def judge(lp):
                                 else f" — its owner is {ctl}" if ctl else ""))
             elif not listed and cleared:
                 locked += share
-                reasons.append(f"{share:.0f}% in {info['name']} {o} — no removal path: {', '.join(r['fn'] for r in cleared[:3])} run but remove no liquidity (traced)")
+                srcd = [r for r in cleared if "verified source" in (r.get("traced") or "")]
+                reasons.append(f"{share:.0f}% in {info['name']} {o} — no removal path: {', '.join(r['fn'] for r in cleared[:3])} remove no liquidity "
+                               + ("(traced; " + "; ".join(f"{r['fn']}: {r['traced'].split('verified source: ', 1)[1].rstrip(')')} in the verified source"
+                                                         for r in srcd[:2]) + ")" if srcd else "(traced)"))
             elif listed and info.get("exits") == [] and not info.get("proxy"):
                 locked += share
                 reasons.append(f"{share:.0f}% in {info['name']} {o} — no removal path in its code: it never calls decreaseLiquidity/burn/"
@@ -585,7 +661,8 @@ def judge(lp):
                                (" — only an ERC-20 approve helper (fee swaps)" if info.get("approve_helper") else ""))
             elif listed:
                 reasons.append(f"{share:.0f}% in {info['name']} {o} — has removal-like fns ({', '.join(r['fn'] for r in listed[:3])}) needing args; owner {info.get('controller') or info.get('owner')}" +
-                               (f"; {', '.join(r['fn'] for r in cleared[:2])} traced: remove no liquidity" if cleared else ""))
+                               (f"; {', '.join(r['fn'] for r in cleared[:2])} traced: remove no liquidity" if cleared else "") +
+                               ("; source check finishing in background — re-check shortly" if any(r.get("src_pending") for r in listed) else ""))
             else:
                 locked += share
                 reasons.append(f"{share:.0f}% in {info['name']} {o} — no removal function found" + (" (verified)" if info.get("verified") else " (UNVERIFIED)"))

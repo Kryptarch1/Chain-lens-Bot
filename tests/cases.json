@@ -311,5 +311,16 @@
    "quote BITCOIN"
   ],
   "why": "Hatchery launch paired with BITCOIN (HPOS10I): DexScreener can't price that pool (liq None) so it sorted LAST and the check judged a $500 ETH pool other wallets opened -> false NOT SAFE. The pool created in the launch tx must be the main pool. The ETH pool's 0x72d9 holder is an EIP-7702 wallet (code 0xef0100..) that used to be called a locked contract."
+ },
+ {
+  "name": "CIRCUS",
+  "chain": "rh",
+  "token": "0x40aef3b3891106113d9c2c5bbbc0427cef9bc6c0",
+  "expect_lp": "LOCKED",
+  "must_contain": [
+   "CircusLpLocker",
+   "fixed 0 = collects fees in the verified source"
+  ],
+  "why": "Circus launchpad (rh): all v4 positions sit in CircusLpLocker (Clanker-style, verified). collectRewardsWithoutUnlock(address) reverts when simulated alone (modifyLiquiditiesWithoutUnlock only works inside a swap's unlock), so the trace stayed 'unresolved' -> false UNCLEAR. Its verified source decreases liquidity by a literal 0 (fee collect only) -> LOCKED. First-ever check may say 'source check finishing in background' (cold Slither compile); the re-check is LOCKED."
  }
 ]

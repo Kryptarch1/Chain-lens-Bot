@@ -89,9 +89,13 @@ async def code(ex, addr, selector, timeout=90):
     if not solc:
         return {"error": f"no compiler for {sf.get('compiler')}"}
     settings = sf.get("settings") or {"optimizer": {"enabled": sf.get("optimizer"), "runs": sf.get("runs", 200)}}
-    allf = await _work(sf["files"], settings, solc, sf.get("name"), timeout, {"mode": "code_all"})
+    allkey = f"codeall:v{VERSION}:{ex.chain}:{addr.lower()}"  # a compile the check's budget cut short lands here (lib/bg.py)
+    ca = cache.get(allkey)
+    allf = (json.loads(ca) if isinstance(ca, str) else ca) if ca else \
+        await _work(sf["files"], settings, solc, sf.get("name"), timeout, {"mode": "code_all"}, bg_key=allkey)
     if not allf.get("ok"):
         return allf
+    cache.set(allkey, json.dumps(allf))
     for sel, res in (allf.get("functions") or {}).items():  # one compile -> every function cached
         if not res.get("error"):
             res["ok"] = True
